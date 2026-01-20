@@ -1,0 +1,8 @@
+pyodbc
+Pillow
+numpy
+pandas
+scikit-learn
+openpyxl
+shap
+tk
