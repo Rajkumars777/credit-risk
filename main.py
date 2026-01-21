@@ -77,8 +77,9 @@ class App(tk.Tk):
             self.after(0, lambda pil_img=img: self._finish_init(pil_img))
         except Exception as e:
             # Close splash and show an error if something goes wrong
+            error_msg = str(e)
             self.after(0,
-                       lambda: (self.splash.destroy(), tk.messagebox.showerror("Init Error", str(e)), self.destroy()))
+                       lambda: (self.splash.destroy(), tk.messagebox.showerror("Init Error", error_msg), self.destroy()))
             
     def _finish_init(self, pil_img):
         """Back on the main thread: build Tk widgets, close splash, show main window."""
@@ -345,6 +346,9 @@ class App(tk.Tk):
                         df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0).astype(float)
                 
                 df.drop_duplicates(inplace=True)
+                
+                if len(df) > 1:
+                    messagebox.showwarning("Multiple Rows", f"CSV contains {len(df)} rows. Only the first row will be processed for inference.")
                 
                 # Use the first row as the data
                 row = df.iloc[0].to_dict()
