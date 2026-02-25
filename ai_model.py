@@ -344,9 +344,10 @@ class AIModel:
             "rows": rows,
         }
 
-    def predict_from_features(self, row_dict: Dict[str, Any]) -> int:
+    def predict_from_features(self, row_dict: Dict[str, Any]) -> float:
         df = self._prepare_inference_df(row_dict)
-        return int(self.rf.predict(df[self.features])[0])
+        proba = self.rf.predict_proba(df[self.features])[0]
+        return float(proba[0])  # probability of class 0
 
     def predict_by_index(self, idx: int) -> int:
         if self.X_full is None or len(self.X_full) == 0:
