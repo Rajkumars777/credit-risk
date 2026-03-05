@@ -60,13 +60,13 @@ class AIModel:
         'Submitted ID   - type',
         'Marital Status - Scoring Code',
         'Product Type',
-        'Contract Start Date',
+        #'Contract Start Date',
         'Vehicle List Price',
         'LOAN AMORT',
-        'Mode of Payment',
+        #'Mode of Payment',
         'Co-Borrowers',
-        'Age',
-        'LRD'
+        'Age'
+        #'LRD'
     ]
 
     categorical_cols = [
@@ -75,9 +75,9 @@ class AIModel:
         'Citizenship  - type',
         'Submitted ID   - type',
         'Product Type',
-        'Mode of Payment',
-        'Co-Borrowers',
-        'LRD'
+        #'Mode of Payment',
+        'Co-Borrowers'
+        #'LRD'
     ]
 
     @staticmethod
@@ -151,9 +151,13 @@ class AIModel:
         needed_cols = self.features + ["Original Longest DPD", self.TARGET]
         data = data[needed_cols]
 
-        data['Contract Start Date'] = pd.to_datetime(data['Contract Start Date'], format='%m/%d/%Y', errors='coerce')
-        data['Contract Start Date'].fillna(pd.Timestamp(0), inplace=True)
-        data['Contract Start Date'] = data['Contract Start Date'].astype(int) / 10**9
+        # data['Contract Start Date'] = pd.to_datetime(data['Contract Start Date'], format='%m/%d/%Y', errors='coerce')
+        # data['Contract Start Date'].fillna(pd.Timestamp(0), inplace=True)
+        # data['Contract Start Date'] = data['Contract Start Date'].astype(int) / 10**9
+        
+        # Mending As per clients request 
+        cols_to_drop = ['Contract Start Date', 'LRD', 'Mode of Payment']
+        data = data.drop(columns=[col for col in cols_to_drop if col in data.columns])
 
         numerical_cols = [c for c in self.features if c not in self.categorical_cols]
         for col in numerical_cols:

@@ -3,7 +3,7 @@ from tkinter import font, messagebox, filedialog
 from tkinter import ttk
 from PIL import Image, ImageTk
 from ai_model import AIModel, resource_path
-from db import fetch_ci_mock_crifv4
+from db import fetch_ci_mock_crifv4, load_config, save_config
 from datetime import datetime, timedelta, date
 import threading
 from splash import Splash
@@ -217,10 +217,17 @@ class App(tk.Tk):
     def _build_scoring(self):
         f = self.scoring_frame = tk.Frame(self, bg=self.BG_GRAY)
         f.place(relx=0, rely=0, relwidth=1, relheight=1)
+
         card = tk.Frame(f, bg="white")
         card.place(relx=0.5, rely=0.5, anchor="center", width=740, height=780)
 
         tk.Label(card, image=self.logo, bg="white").pack(pady=(20, 5))
+        # gear/settings button in upper right corner of the scoring frame
+        gear_btn = tk.Button(card, text="⚙", command=self._open_db_settings,
+                             bg=self.BG_GRAY, fg="black", bd=0,
+                             font=font.Font(size=14), cursor="hand2")
+        # place a little inset from the top-right edge
+        gear_btn.place(relx=1.0, rely=0.0, anchor="ne", x=-10, y=10)
         tk.Label(card, text="Credit Score Calculator", bg="white", fg=self.GREEN,
                  font=font.Font(size=18, weight="bold")).pack(pady=(0, 15))
 
@@ -658,6 +665,62 @@ class App(tk.Tk):
             self._predict_with_current()
         except Exception as e:
             return messagebox.showerror("Prediction Error", f"Failed to predict: {e}")
+
+    # ---- database settings dialog ----
+    def _open_db_settings(self):
+        """Display a separate window where user may view/edit DB connection info."""
+        cfg = load_config()
+        top = tk.Toplevel(self)
+        top.title("Database Settings")
+        top.geometry("460x320")
+        top.configure(bg="white")
+        top.resizable(False, False)
+
+        # header label
+        hdr = tk.Label(top, text="Database Connection", bg="white",
+                       fg=self.GREEN, font=font.Font(size=16, weight="bold"))
+        hdr.pack(pady=(16, 8))
+
+        entries = {}
+        for label_text, key in (
+            ("Server", "server"),
+            ("Database", "database"),
+            ("User", "user"),
+            ("Password", "password"),
+            ("Driver", "driver"),
+        ):
+            frm = tk.Frame(top, bg="white")
+            frm.pack(fill="x", padx=24, pady=6)
+            tk.Label(frm, text=label_text + ":", bg="white", width=12, anchor="w",
+                     font=font.Font(size=10)).pack(side="left")
+            ent = tk.Entry(frm, width=34)
+            ent.pack(side="right", fill="x", expand=True)
+            ent.insert(0, cfg.get(key, ""))
+            if key == "password":
+                ent.config(show="*")
+            entries[key] = ent
+
+        # buttons frame
+        btnfrm = tk.Frame(top, bg="white")
+        btnfrm.pack(pady=12)
+        def save():
+            newcfg = {k: e.get().strip() for k, e in entries.items()}
+            save_config(newcfg)
+            messagebox.showinfo("Settings", "Database configuration saved.")
+            top.destroy()
+
+        btn_save = tk.Button(btnfrm, text="Save", command=save,
+                        bg=self.GREEN, fg="black",
+                        activebackground=self.GREEN, activeforeground="black",
+                        font=font.Font(size=12), cursor="hand2")
+        btn_save.pack(side="left", ipadx=10, ipady=4, padx=10)
+        self._decorate(btn_save)
+        btn_cancel = tk.Button(btnfrm, text="Cancel", command=top.destroy,
+                        bg="#AAA", fg="black",
+                        activebackground="#AAA", activeforeground="black",
+                        font=font.Font(size=12), cursor="hand2")
+        btn_cancel.pack(side="left", ipadx=10, ipady=4, padx=10)
+        self._decorate(btn_cancel)
 
 if __name__ == "__main__":
     App().mainloop()
