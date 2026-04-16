@@ -1,5 +1,8 @@
 import sys
 import os
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__),'../..')))
+
 import hashlib
 from pathlib import Path
 import pandas as pd
@@ -10,6 +13,7 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score, f1_score
 from sklearn.preprocessing import LabelEncoder
 import joblib
+
 try:
     import shap
 except ImportError:
@@ -17,10 +21,50 @@ except ImportError:
 import json, difflib
 
 def resource_path(rel_path: str) -> str:
-    """Get absolute path to resource, works for dev and for PyInstaller."""
+    """Get absolute path to resource, works for dev and for PyInstaller.
+    
+    PyInstaller bundles with these mappings:
+      src/data/img -> img/
+      src/data/dataset -> dataset/
+      src/data/database -> database/
+    """
     if getattr(sys, "frozen", False):
+        # In frozen mode, files are at root of _MEIPASS
+        if rel_path.startswith("src/data/img/"):
+            rel_path = rel_path.replace("src/data/img/", "img/")
+        elif rel_path.startswith("src/data/dataset/"):
+            rel_path = rel_path.replace("src/data/dataset/", "dataset/")
+        elif rel_path.startswith("src/data/database/"):
+            rel_path = rel_path.replace("src/data/database/", "database/")
         return os.path.join(sys._MEIPASS, rel_path)  # type: ignore[attr-defined]
-    return os.path.join(os.path.dirname(__file__), rel_path)
+    
+    # Development mode
+    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '../..'))
+    return os.path.join(project_root, rel_path)
+
+def _get_models_dir() -> str:
+    """Get path to models directory in a writable location.
+    
+    For PyInstaller (frozen), cache goes to user's home.
+    For development, use the src/backend/models directory.
+    """
+    try:
+        if getattr(sys, "frozen", False):
+            # Running as PyInstaller executable - use user cache
+            app_dir = os.path.join(os.path.expanduser("~"), ".jaccs_credit_app")
+            models_dir = os.path.join(app_dir, "models_cache")
+            os.makedirs(models_dir, exist_ok=True)
+            return models_dir
+        else:
+            # Development mode
+            models_dir = os.path.join(os.path.dirname(__file__), "models")
+            os.makedirs(models_dir, exist_ok=True)
+            return models_dir
+    except Exception as e:
+        print(f"[AIModel] Warning: Failed to create models directory ({e}). Using temp location.")
+        # Fallback to a temp location if creation fails
+        import tempfile
+        return tempfile.gettempdir()
 
 def _excel_sha1(path: str) -> str:
     """Fast-ish SHA1 of a file to detect changes."""
@@ -32,10 +76,9 @@ def _excel_sha1(path: str) -> str:
 
 def _model_path_for_excel(excel_filename: str) -> str:
     """Where to store the cached model bundle."""
-    base_dir = Path(os.path.dirname(__file__)) / "models"
-    base_dir.mkdir(exist_ok=True)
+    base_dir = _get_models_dir()
     stem = Path(excel_filename).stem
-    return str(base_dir / f"{stem}_rf.joblib")
+    return str(Path(base_dir) / f"{stem}_rf.joblib")
 
 class AIModel:
     # -- Static Variable --#
@@ -111,35 +154,81 @@ class AIModel:
             return np.nan
         
     def __init__(self, excel_filename: str):
-        # Resolve paths
+        # Resolve paths - ensure we use relative paths consistently
+        # If an absolute path is passed, extract just the relative portion
+        if os.path.isabs(excel_filename):
+            # Try to extract relative path from absolute
+            try:
+                project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '../..'))
+                excel_filename = os.path.relpath(excel_filename, project_root)
+            except ValueError:
+                pass  # Keep original if relpath fails
+        
         self.excel_path = resource_path(excel_filename)
         self.model_path = _model_path_for_excel(excel_filename)
         self._loaded_from_cache = False
-
-        # NEW: make sure these always exist
-        self._loaded_from_cache = False
         self._explainer = None  # SHAP (lazy)
 
-        # Try to load cached model first
-        excel_sig = _excel_sha1(self.excel_path)
+        # Try to load cached model first (only compute SHA1 if cache exists)
         if os.path.exists(self.model_path):
             try:
                 bundle = joblib.load(self.model_path)
-                if bundle.get("excel_sha1") == excel_sig and bundle.get("version") == 1:
-                    self._load_bundle(bundle)
-                    self._loaded_from_cache = True
-                    print(f"[AIModel] Loaded cached model: {self.model_path}")
-                    return
+                # Try to validate against Excel SHA1, but don't fail if Excel is missing
+                excel_sig = None
+                try:
+                    if os.path.exists(self.excel_path):
+                        excel_sig = _excel_sha1(self.excel_path)
+                except Exception:
+                    pass  # Excel file not available, skip signature check
+                
+                # Load cache if version matches (skip SHA1 check if Excel is missing)
+                if bundle.get("version") == 1:
+                    if excel_sig is None or bundle.get("excel_sha1") == excel_sig:
+                        self._load_bundle(bundle)
+                        self._loaded_from_cache = True
+                        print(f"[AIModel] Loaded cached model: {self.model_path}")
+                        return
+                    else:
+                        print("[AIModel] Cache exists but Excel signature mismatch. Retraining…")
                 else:
-                    print("[AIModel] Cache exists but signature/version mismatch. Retraining…")
+                    print("[AIModel] Cache exists but version mismatch. Retraining…")
             except Exception as e:
-                print(f"[AIModel] Failed to load cache ({e}). Retraining…")
+                print(f"[AIModel] Failed to load cache ({e}). Attempting to retrain…")
 
-        # Train fresh model (and save)
+        # Train fresh model (and save) - Excel file is required here
+        if not os.path.exists(self.excel_path):
+            raise Exception(
+                f"Training data Excel file not found: {self.excel_path}\n"
+                f"Cached model also unavailable. Please provide the Excel training data file."
+            )
+        
+        try:
+            original_data = pd.read_excel(self.excel_path, engine='openpyxl')
+        except Exception as e:
+            error_msg = str(e)
+            if "worksheet index 0 is invalid" in error_msg:
+                raise Exception(f"Training data Excel file appears to be corrupted or empty: {self.excel_path}")
+            elif "No worksheets found" in error_msg:
+                raise Exception(f"Training data Excel file contains no worksheets: {self.excel_path}")
+            else:
+                raise Exception(f"Failed to load training data from {self.excel_path}: {error_msg}")
+        
+        # Train and cache the model
+        excel_sig = _excel_sha1(self.excel_path)
         self._train_and_cache(excel_sig)
 
     def _train_and_cache(self, excel_sig: str) -> None:
-        original_data = pd.read_excel(self.excel_path)
+        try:
+            original_data = pd.read_excel(self.excel_path, engine='openpyxl')
+        except Exception as e:
+            error_msg = str(e)
+            if "worksheet index 0 is invalid" in error_msg:
+                raise Exception(f"Training data Excel file appears to be corrupted or empty: {self.excel_path}")
+            elif "No worksheets found" in error_msg:
+                raise Exception(f"Training data Excel file contains no worksheets: {self.excel_path}")
+            else:
+                raise Exception(f"Failed to load training data from {self.excel_path}: {error_msg}")
+        
         data = original_data.copy()
 
         n_original = data.shape[0]
@@ -245,10 +334,10 @@ class AIModel:
                 sample[f] = 0
         df = pd.DataFrame([sample])
 
-        if "Contract Start Date" in df.columns:
-            df['Contract Start Date'] = pd.to_datetime(df['Contract Start Date'], format='%m/%d/%Y', errors='coerce')
-            df['Contract Start Date'].fillna(pd.Timestamp(0), inplace=True)
-            df['Contract Start Date'] = df['Contract Start Date'].astype(int) / 10**9
+        # if "Contract Start Date" in df.columns:
+        #     df['Contract Start Date'] = pd.to_datetime(df['Contract Start Date'], format='%m/%d/%Y', errors='coerce')
+        #     df['Contract Start Date'].fillna(pd.Timestamp(0), inplace=True)
+        #     df['Contract Start Date'] = df['Contract Start Date'].astype(int) / 10**9
 
         numerical_cols = [c for c in self.features if c not in self.categorical_cols]
         for col in numerical_cols:

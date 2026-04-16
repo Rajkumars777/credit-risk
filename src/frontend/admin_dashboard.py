@@ -1,7 +1,10 @@
-# admin_dashboard.py
+import os, sys
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__),'../..')))
+
 import tkinter as tk
 from tkinter import ttk, messagebox, font
-from users import list_users, add_user, delete_user, update_password, set_role
+from src.backend.users import list_users, add_user, delete_user, update_password, set_role
+
 
 class AdminDashboard(tk.Frame):
     GREEN = "#2E7D32"

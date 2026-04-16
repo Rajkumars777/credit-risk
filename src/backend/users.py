@@ -1,7 +1,34 @@
-import csv, os, secrets, hashlib
+import csv, os, secrets, hashlib, sys
 from typing import List, Dict, Optional
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__),'../..')))
 
-USERS_CSV = os.path.join(os.path.dirname(__file__), "users.csv")
+def _get_users_csv_path() -> str:
+    """Get path to users.csv in a writable location.
+    
+    PyInstaller bundles users.csv at root of _MEIPASS.
+    For development, use the src/backend directory.
+    Subsequent writes go to user's home directory.
+    """
+    try:
+        if getattr(sys, "frozen", False):
+            # First check if bundled users.csv exists (read-only template)
+            bundled_path = os.path.join(sys._MEIPASS, "users.csv")  # type: ignore[attr-defined]
+            if os.path.exists(bundled_path):
+                return bundled_path
+            
+            # Otherwise use user writable location
+            app_dir = os.path.join(os.path.expanduser("~"), ".jaccs_credit_app")
+            os.makedirs(app_dir, exist_ok=True)
+            return os.path.join(app_dir, "users.csv")
+        else:
+            # Development mode
+            return os.path.join(os.path.dirname(__file__), "users.csv")
+    except Exception as e:
+        print(f"[Users] Warning: Failed to resolve users.csv path ({e}). Using temp location.")
+        import tempfile
+        return os.path.join(tempfile.gettempdir(), "users.csv")
+
+USERS_CSV = _get_users_csv_path()
 
 def _hash_password(password: str, salt: Optional[str] = None):
     """

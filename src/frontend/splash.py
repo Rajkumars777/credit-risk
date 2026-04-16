@@ -1,11 +1,24 @@
 import sys, os, tkinter as tk
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__),'../..')))
+
 from tkinter import ttk
 from PIL import Image, ImageTk, ImageDraw, ImageFilter, ImageColor
 
 def resource_path(rel_path: str) -> str:
+    """Get absolute path to resource, works for dev and for PyInstaller.
+    
+    PyInstaller bundles with these mappings:
+      src/data/img -> img/
+    """
     if getattr(sys, "frozen", False):
+        # In frozen mode, files are at root of _MEIPASS
+        if rel_path.startswith("src/data/img/"):
+            rel_path = rel_path.replace("src/data/img/", "img/")
         return os.path.join(sys._MEIPASS, rel_path)  # type: ignore[attr-defined]
-    return os.path.join(os.path.dirname(__file__), rel_path)
+    
+    # Development mode
+    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '../..'))
+    return os.path.join(project_root, rel_path)
 
 class Splash(tk.Toplevel):
     BG = "white"
