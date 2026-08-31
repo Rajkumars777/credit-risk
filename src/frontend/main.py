@@ -73,7 +73,7 @@ class App(tk.Tk):
         try:
             # 1) Load & train AI model (heavy)
             # Pass relative path so AIModel can resolve it correctly for both dev and frozen
-            self.ai = AIModel("src/data/dataset/20250204Variables 002 - Final01.xlsx")
+            self.ai = AIModel("src/May 12 Status Contracts.xlsx","src/Extracted New.xlsx")
 
             # 2) Load header logo image (pure PIL work is OK here)
             img = Image.open(resource_path("src/data/img/logo.png")).resize((180, 70), Image.LANCZOS)
@@ -420,6 +420,41 @@ class App(tk.Tk):
         self.btn_breakdown_is_packed = False
 
     # —— Fetch & map —— #
+    def _coerce_csv_row(self, row: dict) -> dict:
+        """Convert raw CSV values to model-friendly primitive types."""
+        numeric_fields = {
+            'Amount Finance', 'Downpayment', 'Downpayment %', 'Payment Terms', 'Price Gap',
+            'Loan History', 'BAP Amount', 'Interest Rate', 'Claimed Income', 'EV Income', 'BV Income',
+            'Claimed Tenure', 'EV Tenure', 'BV Tenure', 'DSCR', 'Age as of Contract',
+            'Home Ownership', 'Residence Tenure', 'Loan Amort', 'Co-Borrowers', 'Borrower Type',
+            'Contract Start Date'
+        }
+        coerced = {}
+        for key, value in row.items():
+            if value is None:
+                coerced[key] = None
+                continue
+            if isinstance(value, str):
+                value = value.strip()
+                if value == "":
+                    coerced[key] = None
+                    continue
+                if key in numeric_fields and value.lower() not in {'nan', 'none', 'null'}:
+                    try:
+                        cleaned = value.replace(',', '')
+                        coerced[key] = float(cleaned)
+                        continue
+                    except ValueError:
+                        pass
+                if key == 'Contract Start Date':
+                    try:
+                        coerced[key] = pd.to_datetime(value, errors='raise').strftime('%Y-%m-%d')
+                        continue
+                    except Exception:
+                        pass
+            coerced[key] = value
+        return coerced
+
     def fetch_customer(self):
         # Clear previous
         for i in self.tree.get_children():
@@ -476,8 +511,7 @@ class App(tk.Tk):
                 
                 # Use the first row as the data
                 row = df.iloc[0].to_dict()
-                # Convert to match DB format (assume CSV has same column names)
-                self.db_row = row
+                self.db_row = self._coerce_csv_row(row)
             except Exception as e:
                 return messagebox.showerror("CSV Error", f"Failed to load CSV: {e}")
         else:
@@ -510,13 +544,8 @@ class App(tk.Tk):
 
         self.ai_features = self._row_to_ai_features(self.db_row)
 
-        for feat_name in self.ai.features:
+        for feat_name in self.ai.RAW_INPUT_FEATURES:
             val = self.ai_features.get(feat_name, "")
-            # if feat_name == "Contract Start Date" and self.contract_date_defaulted:
-            #     if val:
-            #         val = f"{val} (defaulted from missing)"
-            #     else:
-            #         val = "(defaulted from missing)"
             if val is None or val == "":
                 val = "Missing"
             self.tree.insert("", "end", values=(feat_name, str(val)))
@@ -583,159 +612,108 @@ class App(tk.Tk):
         for item in self.tree.get_children():
             feat, val = self.tree.item(item, "values")
             val = self._strip_defaulted_note(val)
-            if feat in self.ai.categorical_cols:
-                self.ai_features[feat] = val if val and val.lower() != "missing" else "Missing"
+            if feat in self.ai.RAW_INPUT_FEATURES:
+                self.ai_features[feat] = val if val and str(val).lower() != "missing" else "Missing"
             else:
-                if isinstance(val, str):
-                    val = val.replace(",", "")
-                self.ai_features[feat] = "" if val == "Missing" else val
+                self.ai_features[feat] = val if val and str(val).lower() != "missing" else "Missing"
 
     def _normalize_input_row(self, row: dict) -> dict:
         if row is None:
             return {}
-        mapped = dict(row)
+        source = {}
+        for key, value in dict(row).items():
+            if value is None:
+                continue
+            key_text = str(key).strip()
+            if key_text == "":
+                continue
+            value_text = str(value).strip()
+            if value_text.lower() in {"nan", "none", "null"}:
+                continue
+            source[key_text] = value
 
-        if "Amount Finance" in mapped:
-            mapped["AmountFinance"] = mapped.get("Amount Finance")
-            mapped["Amount Financed - Amount"] = mapped.get("Amount Finance")
+        aliases = {
+            'Amount Finance': ['Amount Finance', 'Amount Financed - Amount', 'AmountFinance'],
+            'Downpayment': ['Downpayment', 'Downpayment - Amount', 'DP'],
+            'Downpayment %': ['Downpayment %', 'DownpaymentPercent', 'DP %'],
+            'Payment Terms': ['Payment Terms', 'Payment Terms - Number', 'Terms', 'Term in Months', 'Loan Term'],
+            'Asset': ['Asset'],
+            'Manufacturer': ['Manufacturer', 'Unit Brand', 'Unit Brand   - Scoring Code'],
+            'Type of Unit': ['Type of Unit', 'Type of unit  - Scoring Code'],
+            'Price Gap': ['Price Gap', 'Price Gap - Scoring Code'],
+            'Loan History': ['Loan History', 'Loan History - Scoring Code'],
+            'BAP Type': ['BAP Type', 'BAP / CIC Findings - Scoring Code'],
+            'BAP Amount': ['BAP Amount', 'BAPScore'],
+            'Interest Rate': ['Interest Rate'],
+            'Claimed Income': ['Claimed Income', 'INCOME - Amount', 'TotalNetCombined', 'NetMonthly'],
+            'EV Income': ['EV Income'],
+            'BV Income': ['BV Income'],
+            'Employment Type': ['Employment Type', 'Employment Type  - type', 'EmpType', 'EmploymentCategory'],
+            'Claimed Tenure': ['Claimed Tenure', 'Employment / Business Tenure  - Scoring Code', 'TenureCategoryScore'],
+            'EV Tenure': ['EV Tenure'],
+            'BV Tenure': ['BV Tenure'],
+            'DSCR': ['DSCR', 'DSCR - %'],
+            'Age as of Contract': ['Age as of Contract', 'Age', 'AGE'],
+            'Home Ownership': ['Home Ownership', 'Home Ownership - TYPE', 'HomeOwner'],
+            'Residence Tenure': ['Residence Tenure', 'Residence Tenure  - Scoring Code', 'ResidenceScore'],
+            'Citizenship': ['Citizenship', 'Citizenship  - type', 'Nationality', 'CBNationality'],
+            'Dealer Name': ['Dealer Name', 'Type of dealer  - Scoring Code', 'DealerScore'],
+            'Submitted ID': ['Submitted ID', 'Submitted ID   - type', 'IDSubmit'],
+            'Marital Status': ['Marital Status', 'Marital Status - Scoring Code', 'CivilScore'],
+            'Loan Amort': ['Loan Amort', 'LOAN AMORT', 'EMIFunction'],
+            'Product Type': ['Product Type', 'Type', 'LoanPurpose'],
+            'Mode of Payment': ['Mode of Payment'],
+            'Co-Borrowers': ['Co-Borrowers', 'Co-Borrowers', 'CBCount'],
+            'Borrower Type': ['Borrower Type'],
+            'Contract Start Date': ['Contract Start Date', 'ContractStartDate'],
+        }
 
-        if "Vehicle List Price" in mapped:
-            mapped["Vehicle List Price"] = mapped.get("Vehicle List Price")
+        normalized = {}
+        for canonical, values in aliases.items():
+            for candidate in values:
+                if candidate in source:
+                    normalized[canonical] = source[candidate]
+                    break
 
-        if "Term in Months" in mapped:
-            mapped["Payment Terms - Number"] = mapped.get("Term in Months")
-            mapped["Terms"] = mapped.get("Term in Months")
+        for key in source:
+            if key in AIModel.RAW_INPUT_FEATURES and key not in normalized:
+                normalized[key] = source[key]
 
-        if "Loan Term" in mapped:
-            mapped["Payment Terms - Number"] = mapped.get("Loan Term")
-            mapped["Terms"] = mapped.get("Loan Term")
-
-        if "Citizenship" in mapped:
-            mapped["Citizenship  - type"] = mapped.get("Citizenship")
-
-        if "ID Submitted" in mapped:
-            mapped["Submitted ID   - type"] = mapped.get("ID Submitted")
-
-        if "Type of Dealer" in mapped:
-            mapped["Type of dealer  - Scoring Code"] = mapped.get("Type of Dealer")
-
-        if "BAP Amount" in mapped:
-            mapped["BAPScore"] = mapped.get("BAP Amount")
-
-        if "Credit Experience" in mapped:
-            mapped["CreditExpScore"] = mapped.get("Credit Experience")
-
-        if "Vehicle List Price" in mapped and "Amount Financed - Amount" not in mapped:
-            # fallback clue if needed, keep as-is
-            pass
-
-        return mapped
+        return normalized
 
     # —— Mapping row -> features —— #
     def _row_to_ai_features(self, r: dict) -> dict:
-        def num(*keys, default=0.0):
-            for k in keys:
-                if k in r and r[k] not in (None, ""):
-                    try:
-                        return float(str(r[k]).replace(",", ""))
-                    except Exception:
-                        pass
-            return float(default)
+        if r is None:
+            return {}
 
-        def txt(*keys, default="Missing"):
-            for k in keys:
-                if k in r and r[k] not in (None, ""):
-                    s = str(r[k]).strip()
-                    if s != "":
-                        return s
-            return default
+        source = self._normalize_input_row(r)
+        normalized = {}
+        for key in AIModel.RAW_INPUT_FEATURES:
+            value = source.get(key)
+            if value is None or str(value).strip() == "":
+                normalized[key] = None
+                continue
 
-        def fmt_mdY(v):
-            if isinstance(v, (datetime, date)):
-                return v.strftime("%m/%d/%Y")
-            return str(v)
-        
-        dp_amt = num('Downpayment - Amount', 'DP')
-        vlp = num('Vehicle List Price', 'ListCashPrice')
-        amt_fin = num('Amount Financed - Amount', 'AmountFinance',
-                      default=(vlp - dp_amt if (vlp or dp_amt) else 0.0))
-        pay_terms = int(round(num('Payment Terms - Number', 'Terms', default=0)))
+            if key in {'Amount Finance', 'Downpayment', 'Downpayment %', 'Payment Terms', 'BAP Amount', 'Interest Rate', 'Claimed Income', 'EV Income', 'BV Income', 'Claimed Tenure', 'EV Tenure', 'BV Tenure', 'DSCR', 'Age as of Contract', 'Residence Tenure', 'Loan Amort'}:
+                try:
+                    normalized[key] = float(str(value).replace(',', ''))
+                except Exception:
+                    normalized[key] = value
+            elif key in {'Product Type', 'Mode of Payment', 'Asset', 'Manufacturer', 'Type of Unit', 'Loan History', 'BAP Type', 'Employment Type', 'Home Ownership', 'Citizenship', 'Dealer Name', 'Submitted ID', 'Marital Status', 'Co-Borrowers', 'Borrower Type'}:
+                normalized[key] = str(value).strip()
+            else:
+                normalized[key] = value
 
-        brand_sc = num('Unit Brand   - Scoring Code', 'BrandScore', 'UnitBrandScore')
-        typeunit_sc = num('Type of unit  - Scoring Code', 'TypeUnitScore', 'TypeUnitScoreCode')
-        pricegap_sc = num('Price Gap - Scoring Code', 'PriceGapScore', 'PriceGap')
-        loanhist_sc = num('Loan History - Scoring Code', 'CreditExpScore')
-        bap_sc = num('BAP / CIC Findings - Scoring Code', 'BAPScore')
+        if 'Co-Borrowers' in normalized and normalized['Co-Borrowers'] in (None, '', 'None'):
+            normalized['Co-Borrowers'] = 'Missing'
+        if 'Borrower Type' in normalized and normalized['Borrower Type'] in (None, '', 'None'):
+            normalized['Borrower Type'] = 'Principal'
+        if 'Product Type' in normalized and normalized['Product Type'] in (None, '', 'None'):
+            normalized['Product Type'] = 'Missing'
+        if 'Mode of Payment' in normalized and normalized['Mode of Payment'] in (None, '', 'None'):
+            normalized['Mode of Payment'] = 'Unknown'
 
-        income_amt = num('INCOME - Amount', 'TotalNetCombined', 'NetMonthly')
-        dscr_pct = num('DSCR - %', 'DSCR')
-
-        emp_type = txt('Employment Type  - type', 'EmpType', 'EmploymentCategory')
-        tenure_sc = num('Employment / Business Tenure  - Scoring Code', 'TenureCategoryScore')
-
-        home_type = txt('Home Ownership - TYPE', 'HomeOwner')
-        res_ten_sc = num('Residence Tenure  - Scoring Code', 'ResidenceScore')
-        citizen = txt('Citizenship  - type', 'Nationality', 'CBNationality')
-
-        dealer_sc = num('Type of dealer  - Scoring Code', 'DealerScore')
-        id_type = txt('Submitted ID   - type', 'IDSubmit')
-        marital_sc = num('Marital Status - Scoring Code', 'CivilScore')
-
-        product = txt('Product Type', 'Type', 'LoanPurpose')
-
-        # self.contract_date_defaulted = False
-        # raw_cstart = r.get('Contract Start Date') or r.get('ContractStartDate') or None
-        # if raw_cstart in (None, ""):
-        #     yday = (datetime.now() - timedelta(days=1)).strftime("%m/%d/%Y")
-        #     cstart = yday
-        #     self.contract_date_defaulted = True
-        # else:
-        #     cstart = fmt_mdY(raw_cstart)
-
-        loan_amort = num('LOAN AMORT', 'EMIFunction')
-        # mop = txt('Mode of Payment')
-        cob = txt('Co-Borrowers', default=None)
-        if cob is None:
-            cob = 'Yes' if int(round(num('CBCount', default=0))) > 0 else 'Missing'
-
-        age_val = int(round(num('Age', 'AGE', default=0)))
-        # lrd_val = txt('LRD')
-
-        features = {
-            'Amount Financed - Amount': amt_fin,
-            'Downpayment - Amount': dp_amt,
-            'Payment Terms - Number': pay_terms,
-            'Unit Brand   - Scoring Code': brand_sc,
-            'Type of unit  - Scoring Code': typeunit_sc,
-            'Price Gap - Scoring Code': pricegap_sc,
-            'Loan History - Scoring Code': loanhist_sc,
-            'BAP / CIC Findings - Scoring Code': bap_sc,
-            'INCOME - Amount': income_amt,
-            'Employment Type  - type': emp_type,
-            'Employment / Business Tenure  - Scoring Code': tenure_sc,
-            'DSCR - %': dscr_pct,
-            'Home Ownership - TYPE': home_type,
-            'Residence Tenure  - Scoring Code': res_ten_sc,
-            'Citizenship  - type': citizen,
-            'Type of dealer  - Scoring Code': dealer_sc,
-            'Submitted ID   - type': id_type,
-            'Marital Status - Scoring Code': marital_sc,
-            'Product Type': product,
-            # 'Contract Start Date': cstart, 'LRD': lrd_val, 'Mode of Payment': mop,
-            'Vehicle List Price': vlp,
-            'LOAN AMORT': loan_amort,
-            'Co-Borrowers': cob,
-            'Age': age_val
-        }
-
-        for k in ('Co-Borrowers', 'Product Type',
-                  'Employment Type  - type', 'Home Ownership - TYPE',
-                  'Citizenship  - type', 'Submitted ID   - type'): #'Mode of Payment','LRD'):
-                  
-            if features[k] in (None, ''):
-                features[k] = 'Missing'
-
-        return features
+        return normalized
     
     # —— Predict —— #
     def _predict_with_current(self):
