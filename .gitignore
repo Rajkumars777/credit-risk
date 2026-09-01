@@ -4,3 +4,5 @@ output/
 models/
 dataset/
 self_testing/
+build/
+dist/

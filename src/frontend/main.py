@@ -9,7 +9,7 @@ from tkinter import font, messagebox, filedialog
 from tkinter import ttk
 from PIL import Image, ImageTk
 from src.backend.ai_model import AIModel, resource_path
-from src.backend.db import fetch_ci_mock_crifv4, load_config, save_config, get_connection
+from src.backend.db import fetch_ci_mock_crifv4, load_config, save_config, get_connection, get_connection_local
 from datetime import datetime, timedelta, date
 import threading
 from src.frontend.splash import Splash
@@ -73,7 +73,7 @@ class App(tk.Tk):
         try:
             # 1) Load & train AI model (heavy)
             # Pass relative path so AIModel can resolve it correctly for both dev and frozen
-            self.ai = AIModel("src/May 12 Status Contracts.xlsx","src/Extracted New.xlsx")
+            self.ai = AIModel("src/data/May 12 Status Contracts.xlsx","src/data/Extracted New.xlsx")
 
             # 2) Load header logo image (pure PIL work is OK here)
             img = Image.open(resource_path("src/data/img/logo.png")).resize((180, 70), Image.LANCZOS)
@@ -947,6 +947,7 @@ class App(tk.Tk):
         # Try connection to database
         conn = None
         try:
+            # conn = get_connection_local()
             conn = get_connection()
             if conn is None:
                 raise ValueError("Connection unavailable")
@@ -960,7 +961,7 @@ class App(tk.Tk):
 
         # -- For testing -- Batch processing with no DB access "findme"
         # else:
-        #     self._batch_featch_data_fallback()
+            # self._batch_featch_data_fallback()
 
         # -- Process status popup window
         cnt = len([r for r in self._batch_results if r.get("Predicted DPD") is not None])
@@ -1014,7 +1015,7 @@ class App(tk.Tk):
         # -- Fallback to sample_data.csv for testing 
         sample_df = None
         try:
-            sample_df = pd.read_csv(resource_path("sample_data.csv"))
+            sample_df = pd.read_csv(resource_path("test_data\sample_data.csv"))
         except Exception:
             sample_df = None
 

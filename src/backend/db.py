@@ -117,6 +117,65 @@ def save_config(cfg: dict):
         # silently ignore write errors
         pass
 
+def _resolve_driver(driver_name=None):
+    installed = pyodbc.drivers()
+    preferred = [
+        "ODBC Driver 18 for SQL Server",
+        "ODBC Driver 17 for SQL Server",
+        "SQL Server Native Client 11.0",
+        "SQL Server",
+    ]
+    if driver_name:
+        return driver_name
+    for name in preferred:
+        if name in installed:
+            return name
+    return installed[0] if installed else "ODBC Driver 17 for SQL Server"
+
+
+def _server_candidates(server=None):
+    raw = [
+        server,
+        os.getenv("SQL_SERVER"),
+        r"LEGION\SQLEXPRESS",
+        r"localhost\SQLEXPRESS",
+        r"(local)\SQLEXPRESS",
+        r"127.0.0.1",
+        r"localhost",
+        r"(local)",
+    ]
+    seen = set()
+    out = []
+    for item in raw:
+        if not item:
+            continue
+        norm = item.strip()
+        if norm not in seen:
+            seen.add(norm)
+            out.append(norm)
+    return out
+
+
+# --- For Developer Testing --- #
+def get_connection_local(server=None, database=None, user=None, password=None, driver=None, encrypt="yes", trustservercertificate="yes"):
+    database = database or "ltid"
+    driver = _resolve_driver(driver)
+    last_error = None
+
+    for srv in _server_candidates(server):
+        auth = f"UID={user};PWD={password};" if user and password else "Trusted_Connection=yes;"
+        conn_str = (
+            f"DRIVER={{{driver}}};SERVER={srv};DATABASE={database};{auth}"
+            f"Encrypt={encrypt};TrustServerCertificate={trustservercertificate};"
+        )
+        try:
+            return pyodbc.connect(conn_str, timeout=10)
+        except Exception as exc:
+            last_error = exc
+            print(f"Local connection attempt failed for {srv}: {exc}")
+
+    raise RuntimeError(f"Could not connect locally. Last error: {last_error}")
+
 
 def get_connection(
     server=None,
@@ -126,13 +185,6 @@ def get_connection(
     driver=None,
     # encrypt="yes",
     # trustservercertificate="yes",
-
-    # local
-    # server="localhost,1433",
-    # database="scoringDB",
-    # user="sa",
-    # password="MyStrongPass123",
-    # driver="{ODBC Driver 18 for SQL Server}",
 ):
     # fall back to values from config file when arguments are not supplied
     cfg = load_config()
@@ -146,9 +198,10 @@ def get_connection(
         f"DRIVER={driver};SERVER={server};DATABASE={database};"
         f"UID={user};PWD={password};"
         # f"Encrypt={encrypt};TrustServerCertificate={trustservercertificate};"
+        # f"Trusted_Connection=yes;Encrypt=no;"
     )
     return pyodbc.connect(conn_str)
-
+    
 def fetch_ci_mock_crifv4(party_no: int, application_no: int, conn=None):
     """
     Calls: EXEC dbo.CIMockCrifv4 @party=?, @application=?
@@ -162,6 +215,16 @@ def fetch_ci_mock_crifv4(party_no: int, application_no: int, conn=None):
     try:
         with conn.cursor() as cur:
             cur.execute("EXEC dbo.CIMockCrifv4 @party = ?, @application = ?", party_no, application_no)
+
+            # --- For Testing --- #
+            # cur.execute(
+            #     """
+            #     SELECT * FROM customer
+            #     WHERE [Party No] = ?
+            #     AND [Application No] = ?
+            #     """, party_no, application_no,
+            # )
+            
             columns = [c[0] for c in cur.description] if cur.description else []
             row = cur.fetchone()
             if not row:
