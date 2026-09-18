@@ -722,8 +722,8 @@ class App(tk.Tk):
         ai_pred = self.ai.predict_from_features(feats)
         self.dpd_var.set(f"{ai_pred:.2f}")
 
-        # NEW: compute & show Credit Score = Probability of being category 0 * 100
-        credit_score = ai_pred * 100.0
+        # NOTE: compute & show Credit Score = Probability of being category 0 * 100
+        credit_score = (1 - ai_pred) * 100.0
         if hasattr(self, "credit_var"):
             self.credit_var.set(f"{credit_score:.2f}")
 
@@ -763,7 +763,7 @@ class App(tk.Tk):
             tk.Label(frm, text=val, bg="white", fg="#000", font=font.Font(size=12, weight="bold")).pack(anchor="w")
 
         lab("Base value", f"{result['base_value']:.4f}")
-        lab("Predicted DPD", f"{result['prediction']}")  # Changed to Descreate visualization.
+        lab("Predicted Default Risk", f"{result['prediction']}")  # Changed to Descreate visualization.
         lab("Base + ΣSHAP", f"{result['reconstructed']:.4f}")
 
         # Table with contributions
