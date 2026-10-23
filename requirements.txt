@@ -3,6 +3,7 @@ Pillow
 numpy
 pandas
 scikit-learn
+joblib
 openpyxl
 shap
 lightgbm
