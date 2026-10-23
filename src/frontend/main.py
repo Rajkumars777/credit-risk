@@ -1063,7 +1063,7 @@ class App(tk.Tk):
             predicted_dpd = int(self.ai.rf.predict(df[self.ai.features])[0])
             result["AI Predicted Probability"] = round(ai_pred, 6)
             result["Predicted DPD"] = predicted_dpd
-            result["Credit Score"] = round(ai_pred * 100.0, 2)
+            result["Credit Score"] = round((1 - ai_pred) * 100.0, 2)
         except Exception as e:
             result["Status"] = f"Predict error: {e}"
             self._batch_results.append(result)
