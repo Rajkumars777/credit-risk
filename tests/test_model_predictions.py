@@ -12,24 +12,14 @@ import argparse
 from pathlib import Path
 import pandas as pd
 import numpy as np
-import joblib
 
 # Setup paths
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from src.backend.ai_model import AIModel, resource_path
-
-
-def load_model_bundle(model_dir: Path):
-    """Load cached LightGBM model bundle."""
-    model_files = list(model_dir.glob("*.joblib"))
-    if not model_files:
-        raise FileNotFoundError(f"No .joblib model bundle found in {model_dir}")
-    bundle_path = model_files[0]
-    print(f"[INFO] Loading trained model from: {bundle_path.name}")
-    return joblib.load(bundle_path)
+from src.backend.ai_model import AIModel
+from src.frontend.main import App
 
 
 def assign_risk_tier(score: float) -> str:
@@ -42,68 +32,9 @@ def assign_risk_tier(score: float) -> str:
         return "Low Risk"
 
 
-def encode_dataset(df_processed: pd.DataFrame, bundle: dict) -> pd.DataFrame:
-    """Vectorized feature transformation matching AIModel inference."""
-    features = bundle["features"]
-    base_features = bundle.get("base_features", features)
-    target_maps = bundle.get("target_maps", {})
-    category_maps = bundle.get("category_maps", {})
-    global_mean = bundle.get("global_mean", 0.15)
-    medians = pd.Series(bundle.get("medians", {})).reindex(features).fillna(0.0)
-    imputer = bundle.get("imputer")
-    split_thresholds = bundle.get("split_thresholds", {})
-    dropped_columns = bundle.get("dropped_columns", [])
-    dealer_smooth = bundle.get("dealer_smooth", {})
-    dealer_high_cutoff = bundle.get("dealer_high_cutoff", 0.0)
-    dealer_mid_cutoff = bundle.get("dealer_mid_cutoff", 0.0)
-    dealer_dti_cutoff = bundle.get("dealer_dti_cutoff", 0.0)
-
-    frame = df_processed.drop(columns=["Longest_DPD", "Target"], errors="ignore").copy()
-
-    dealer = "Dealer Name"
-    if dealer in frame and dealer_smooth:
-        rate = frame[dealer].astype(str).map(dealer_smooth).fillna(global_mean)
-        tier = pd.cut(rate, [-np.inf, dealer_mid_cutoff, dealer_high_cutoff], labels=[0, 1]).astype(float).fillna(2)
-        frame["Dealer_Default_Rate"] = rate
-        frame["LoanHistory_x_DealerRisk"] = frame["Loan_History_Risk"] * rate
-        frame["Dealer_x_LowDP"] = rate * (1 - frame["Downpayment"] / 100)
-        frame["Dealer_x_Term"] = rate * frame["Payment Terms"]
-        frame["Dealer_Risk_Tier"] = tier
-        frame["High_Risk_Dealer"] = (tier == 2).astype(int)
-        frame["Mid_Risk_Dealer"] = (tier == 1).astype(int)
-        frame["GoodBorrower_RiskyDealer"] = ((tier >= 1) & (frame["DTI"] < dealer_dti_cutoff)).astype(int)
-        frame["HighRiskMOP_x_DealerTier"] = frame["High_Risk_MOP"] * tier
-
-    for column, mapping in target_maps.items():
-        if column in frame:
-            frame[f"{column}_TE"] = frame[column].astype(str).map(mapping).fillna(global_mean)
-
-    frame = frame.drop(columns=[c for c in dropped_columns if c in frame], errors="ignore")
-
-    for column, mapping in category_maps.items():
-        if column in frame:
-            frame[column] = frame[column].fillna("Unknown").astype(str).map(mapping).fillna(-1)
-
-    frame = frame.reindex(columns=base_features, fill_value=np.nan)
-
-    if imputer is not None:
-        impute_columns = [c for c in ("Claimed Income", "Claimed Tenure", "DSCR", "Residence Tenure") if c in frame]
-        if impute_columns:
-            frame[impute_columns] = imputer.transform(frame[impute_columns])
-
-    for column, threshold in split_thresholds.items():
-        split_column = f"{column}_cd_split"
-        if column in frame and split_column in features:
-            frame[split_column] = (frame[column] <= threshold).astype(int)
-
-    frame = frame.reindex(columns=features, fill_value=np.nan)
-    return frame.apply(pd.to_numeric, errors="coerce").fillna(medians)
-
-
 def run_testing(input_file: Path, output_file: Path = None, show_samples: int = 20):
-    model_dir = PROJECT_ROOT / "src" / "backend" / "models"
-    bundle = load_model_bundle(model_dir)
-    model = bundle["model"]
+    model = AIModel("src/data/May 12 Status Contracts.xlsx", "src/data/Extracted New.xlsx")
+    ui_input = App.__new__(App)
 
     print(f"[INFO] Reading input data from: {input_file}")
     if input_file.suffix.lower() in [".xlsx", ".xls"]:
@@ -112,15 +43,15 @@ def run_testing(input_file: Path, output_file: Path = None, show_samples: int = 
         df_raw = pd.read_csv(input_file)
 
     print(f"[INFO] Loaded {len(df_raw):,} records. Preprocessing features...")
-    df_aligned = df_raw.rename(columns={"Unit Brand": "Manufacturer"})
-    df_processed = AIModel.process_data(df_aligned)
+    print("[INFO] Computing model predictions and credit scores using the UI inference path...")
+    ui_rows = []
+    for row in df_raw.to_dict(orient="records"):
+        normalized = ui_input._normalize_input_row(row)
+        ui_rows.append(ui_input._row_to_ai_features(normalized))
+    predicted_risk = model.predict_from_features_batch(ui_rows)
 
-    # Encode features
-    X_enc = encode_dataset(df_processed, bundle)
-
-    print("[INFO] Computing model predictions and credit scores...")
-    predicted_risk = model.predict_proba(X_enc)[:, 1]
     credit_scores = (1.0 - predicted_risk) * 100.0
+    df_processed = df_raw.rename(columns={"Current DPD": "Longest_DPD"})
 
     # Build results DataFrame with exact columns requested
     contract_id = df_processed.get("Contract ID", df_raw.get("Contract ID", pd.Series(range(1, len(df_processed) + 1))))
@@ -230,4 +161,3 @@ if __name__ == "__main__":
         sys.exit(1)
 
     run_testing(input_path, output_path, show_samples=args.samples)
-

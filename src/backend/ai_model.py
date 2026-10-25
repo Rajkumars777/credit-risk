@@ -241,7 +241,7 @@ class AIModel:
         return float(numbers[0]) if numbers else np.nan
 
     @classmethod
-    def process_data(cls, data: pd.DataFrame) -> pd.DataFrame:
+    def process_data(cls, data: pd.DataFrame, inference: bool = False) -> pd.DataFrame:
         """Apply the notebook's cleaning and feature engineering."""
         data = data.copy().rename(columns={'Current DPD': 'Longest_DPD'})
 
@@ -277,7 +277,8 @@ class AIModel:
             data = data.drop(columns=['Contract Start Date'])
         if 'Marital Status' in data:
             data['Marital Status'] = data['Marital Status'].replace({'Separated': 'Without Partner', 'Divorced': 'Without Partner', 'Single': 'Single/Not Married', 'Not Married': 'Single/Not Married'})
-            data = data[~data['Marital Status'].isin(['Partner', 'Unspecified'])]
+            if not inference:
+                data = data[~data['Marital Status'].isin(['Partner', 'Unspecified'])]
         data = data.drop(columns=['Birthday', 'BAP Date'], errors='ignore')
         if 'Longest_DPD' in data:
             data['Longest_DPD'] = pd.to_numeric(data['Longest_DPD'], errors='coerce').fillna(0)
@@ -299,9 +300,10 @@ class AIModel:
             'Residence Tenure', 'BV Income', 'EV Income', 'BAP Amount',
             'Claimed Tenure', 'Interest Rate', 'Price Gap', 'DSCR',
         ]
-        for column in winsor_columns:
-            if column in data:
-                data[column] = data[column].clip(data[column].quantile(.01), data[column].quantile(.99))
+        if not inference:
+            for column in winsor_columns:
+                if column in data:
+                    data[column] = data[column].clip(data[column].quantile(.01), data[column].quantile(.99))
 
         epsilon = 1e-9
 
@@ -325,7 +327,7 @@ class AIModel:
         data['DTI_x_LTV'] = data['DTI'] * data['LTV']
         data['DP_to_Income'] = divide('Downpayment', 'Claimed Income')
         data['Age_at_Maturity'] = data['Age as of Contract'] + data['Payment Terms'] / 12
-        data['High_DTI'] = (data['DTI'] > data['DTI'].quantile(.75)).astype(int)
+        data['High_DTI'] = 0 if inference else (data['DTI'] > data['DTI'].quantile(.75)).astype(int)
         data['Tenure_Mismatch'] = (data['Claimed Tenure'] - data['BV Tenure']).abs()
         data['Income_Inconsistency'] = (data['BV Income'] / (data['Claimed Income'] + epsilon)).clip(upper=5)
         verification_columns = ['EV Income', 'BV Income', 'EV Tenure', 'BV Tenure', 'Price Gap', 'DSCR', 'Claimed Income', 'Claimed Tenure']
@@ -665,7 +667,11 @@ class AIModel:
         return features, target_maps, category_maps, medians.to_dict(), split_thresholds, dropped_columns
 
     def _encode_harish_input(self, row_dict: Dict[str, Any]) -> pd.DataFrame:
-        frame = self.process_data(pd.DataFrame([row_dict]))
+        frame = self.process_data(pd.DataFrame([row_dict]), inference=True)
+        return self._encode_processed_harish_input(frame)
+
+    def _encode_processed_harish_input(self, frame: pd.DataFrame) -> pd.DataFrame:
+        """Encode processed rows using the fitted inference metadata."""
         frame = frame.drop(columns=['Longest_DPD', 'Target'], errors='ignore')
         dealer = 'Dealer Name'
         if dealer in frame and getattr(self, 'dealer_smooth', None):
@@ -698,6 +704,14 @@ class AIModel:
                 frame[split_column] = (frame[column] <= threshold).astype(int)
         frame = frame.reindex(columns=self.features, fill_value=np.nan)
         return frame.apply(pd.to_numeric, errors='coerce').fillna(self.medians)
+
+    def predict_from_features_batch(self, rows: List[Dict[str, Any]]) -> np.ndarray:
+        """Predict UI-normalized rows while batching the fitted imputer."""
+        if not rows:
+            return np.asarray([], dtype=float)
+        frame = self.process_data(pd.DataFrame(rows), inference=True)
+        encoded = self._encode_processed_harish_input(frame)
+        return self.model.predict_proba(encoded)[:, 1]
 
     def _train_and_cache(self, data: pd.DataFrame, excel_sig: str) -> None:
         if 'Target' not in data.columns:
