@@ -1,8 +1,7 @@
 {
-    "server": "TEST-DB",
-    "database": "dbAAFS_MAFS",
-    "user": "ENC:U1IGUkRRUV9aDw==",
-    "password": "ENC:c3MGUkRwVFZeCFo=",
-    "driver": "{ODBC Driver 17 for SQL Server}",
-    "_salt": "4990302ddddff16183aac1b47c1326bf"
+    "server": "",
+    "database": "",
+    "user": "",
+    "password": "",
+    "driver": "{ODBC Driver 17 for SQL Server}"
 }

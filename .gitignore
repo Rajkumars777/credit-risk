@@ -1,5 +1,7 @@
 .venv/
 __pycache__/
+.pytest_cache/
+*.pyc
 output/
 models/
 dataset/
@@ -7,3 +9,4 @@ self_testing/
 build/
 dist/
 JACCSScore.spec
+~$*

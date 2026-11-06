@@ -1,7 +1,7 @@
 {
-    "server": "TEST-DB",
-    "database": "dbAAFS_MAFS",
-    "user": "jaccsadmin",
-    "password": "J@ccs@admin",
+    "server": "",
+    "database": "",
+    "user": "",
+    "password": "",
     "driver": "{ODBC Driver 17 for SQL Server}"
 }

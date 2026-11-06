@@ -17,7 +17,7 @@ from sklearn.experimental import enable_iterative_imputer  # noqa: F401
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.impute import IterativeImputer
-from sklearn.metrics import roc_auc_score, roc_curve
+from sklearn.metrics import fbeta_score, mean_absolute_error, precision_score, recall_score, roc_auc_score
 from sklearn.model_selection import train_test_split
 
 try:
@@ -25,7 +25,7 @@ try:
 except ImportError:  # pragma: no cover - optional dependency
     shap = None
 
-from lightgbm import LGBMClassifier
+from lightgbm import LGBMClassifier, LGBMRegressor
 
 
 def resource_path(rel_path: str) -> str:
@@ -135,8 +135,18 @@ class AIModel:
         'colsample_bytree': 0.6008938631093506,
         'reg_alpha': 0.00012940233398199124,
         'reg_lambda': 0.00022914020156036827,
-        'scale_pos_weight': 19.120797456529292,
+        'scale_pos_weight': 4.0,  # ~80% neg / ~20% pos for DPD>0 target (any DPD detection)
     }
+
+    MODEL_VERSION = 14
+    DPD_CATEGORY_LABELS = (
+        'Current',
+        'Early Delinquency',
+        'Moderate Delinquency',
+        'Serious Delinquency',
+        'Severe Delinquency',
+    )
+    MIN_VALIDATION_PRECISION = 0.75
 
     @staticmethod
     def make_balanced_dataset(df, target, random_seed):
@@ -172,7 +182,7 @@ class AIModel:
         if os.path.exists(self.model_path):
             try:
                 bundle = joblib.load(self.model_path)
-                if bundle.get('version') == 4 and bundle.get('excel_sha1') == excel_sig:
+                if bundle.get('version') == self.MODEL_VERSION and bundle.get('excel_sha1') == excel_sig:
                     self._load_bundle(bundle)
                     self._ext_enc = self._try_load_external_encoding()
                     self._loaded_from_cache = True
@@ -249,7 +259,7 @@ class AIModel:
             'Amount Finance', 'Downpayment', 'Downpayment %', 'Payment Terms',
             'BAP Amount', 'Interest Rate', 'Claimed Income', 'EV Income', 'BV Income',
             'Claimed Tenure', 'EV Tenure', 'BV Tenure', 'DSCR', 'Age as of Contract',
-            'Residence Tenure', 'Loan Amort', 'Price Gap', 'Downpayment %',
+            'Residence Tenure', 'Loan Amort', 'Price Gap',
             'Contract_Year', 'Contract_Month'
         ]
         for column in numeric_columns:
@@ -282,7 +292,7 @@ class AIModel:
         data = data.drop(columns=['Birthday', 'BAP Date'], errors='ignore')
         if 'Longest_DPD' in data:
             data['Longest_DPD'] = pd.to_numeric(data['Longest_DPD'], errors='coerce').fillna(0)
-            data['Target'] = (data['Longest_DPD'] > 30).astype(int)
+            data['Target'] = (data['Longest_DPD'] > 1).astype(int)  # DPD > 1 is the default definition
 
         numeric_columns = ['BAP Amount', 'EV Income', 'EV Tenure', 'BV Income', 'Price Gap', 'BV Tenure', 'DSCR', 'Claimed Tenure', 'Claimed Income', 'Residence Tenure', 'Amount Finance', 'Downpayment', 'Payment Terms', 'Interest Rate', 'Loan Amort', 'Age as of Contract', 'Downpayment %']
         for column in numeric_columns:
@@ -327,7 +337,7 @@ class AIModel:
         data['DTI_x_LTV'] = data['DTI'] * data['LTV']
         data['DP_to_Income'] = divide('Downpayment', 'Claimed Income')
         data['Age_at_Maturity'] = data['Age as of Contract'] + data['Payment Terms'] / 12
-        data['High_DTI'] = 0 if inference else (data['DTI'] > data['DTI'].quantile(.75)).astype(int)
+        data['High_DTI'] = (data['DTI'] > 0.40).astype(int)
         data['Tenure_Mismatch'] = (data['Claimed Tenure'] - data['BV Tenure']).abs()
         data['Income_Inconsistency'] = (data['BV Income'] / (data['Claimed Income'] + epsilon)).clip(upper=5)
         verification_columns = ['EV Income', 'BV Income', 'EV Tenure', 'BV Tenure', 'Price Gap', 'DSCR', 'Claimed Income', 'Claimed Tenure']
@@ -359,6 +369,26 @@ class AIModel:
         }
         data['Loan_History_Risk'] = data['Loan History'].map(loan_history_risk).fillna(1)
         data['HighRiskMOP_x_DealerTier'] = np.nan
+
+        # --- New risk features (fix for Personal Loans / zero-collateral) ---
+        if 'Product Type' in data:
+            data['Is_Personal_Loan'] = data['Product Type'].str.contains('Personal', case=False, na=False).astype(int)
+        else:
+            data['Is_Personal_Loan'] = 0
+        bv_missing = data.get('BV Income_missing', pd.Series(1, index=data.index))
+        data['Zero_DP_AND_No_BV'] = ((downpayment_percent == 0) & (bv_missing == 1)).astype(int)
+        ev_inc_m = data.get('EV Income_missing', pd.Series(1, index=data.index))
+        bv_inc_m = data.get('BV Income_missing', pd.Series(1, index=data.index))
+        ev_ten_m = data.get('EV Tenure_missing', pd.Series(1, index=data.index))
+        bv_ten_m = data.get('BV Tenure_missing', pd.Series(1, index=data.index))
+        data['Full_Verification_Missing'] = ((ev_inc_m == 1) & (bv_inc_m == 1) & (ev_ten_m == 1) & (bv_ten_m == 1)).astype(int)
+        data['Collateral_Free_Loan'] = (data['Is_Personal_Loan'] & data['Zero_DP_AND_No_BV']).astype(int)
+        data['FullMissing_x_HighLTV'] = data['Full_Verification_Missing'] * data['LTV'].fillna(1.0)
+        data['Personal_Loan_Risk_Index'] = (
+            data['Is_Personal_Loan'] * 3 +
+            data['Full_Verification_Missing'] * 2 +
+            data['Zero_DP_AND_No_BV'] * 2
+        )
         return data.replace([np.inf, -np.inf], np.nan).reset_index(drop=True)
 
     def process_raw_input(self, row_dict: Dict[str, Any]) -> Dict[str, Any]:
@@ -676,7 +706,12 @@ class AIModel:
         dealer = 'Dealer Name'
         if dealer in frame and getattr(self, 'dealer_smooth', None):
             rate = frame[dealer].astype(str).map(self.dealer_smooth).fillna(self.global_mean)
-            tier = pd.cut(rate, [-np.inf, self.dealer_mid_cutoff, self.dealer_high_cutoff], labels=[0, 1]).astype(float).fillna(2)
+            # Match the 3-bin cut used during training: bins=[-inf, mid, high, inf], labels=[0, 1, 2]
+            tier = pd.cut(
+                rate,
+                bins=[-np.inf, self.dealer_mid_cutoff, self.dealer_high_cutoff, np.inf],
+                labels=[0, 1, 2],
+            ).astype(float).fillna(0)
             frame['Dealer_Default_Rate'] = rate
             frame['LoanHistory_x_DealerRisk'] = frame['Loan_History_Risk'] * rate
             frame['Dealer_x_LowDP'] = rate * (1 - frame['Downpayment'] / 100)
@@ -705,13 +740,112 @@ class AIModel:
         frame = frame.reindex(columns=self.features, fill_value=np.nan)
         return frame.apply(pd.to_numeric, errors='coerce').fillna(self.medians)
 
-    def predict_from_features_batch(self, rows: List[Dict[str, Any]]) -> np.ndarray:
-        """Predict UI-normalized rows while batching the fitted imputer."""
+    def _apply_underwriting_policy_layer(self, raw_df: pd.DataFrame, probs: np.ndarray) -> np.ndarray:
+        """Credit Underwriting Policy Overlay (Basel II / IFRS 9 / Financial Institution standard).
+        Comprehensive retail risk governance:
+        1. Unsecured Personal Loan survivorship bias compensation
+        2. Severe Debt-to-Income (DTI) & Cash Flow Stress correction (with BV/EV fallback for missing income)
+        3. Bureau Verified Income Zero / Unverified income hazard
+        4. Severe Underwater Asset Shortfall WITH Low Downpayment
+        """
+        probs = np.array(probs, dtype=float).copy()
+        if raw_df.empty:
+            return probs
+
+        ptype = raw_df.get('Product Type', pd.Series('', index=raw_df.index)).fillna('').astype(str)
+        is_pl = ptype.str.contains('Personal', case=False)
+
+        amt = pd.to_numeric(raw_df.get('Amount Finance', 0), errors='coerce').fillna(0)
+        dp = pd.to_numeric(raw_df.get('Downpayment', 0), errors='coerce').fillna(0)
+        amort = pd.to_numeric(raw_df.get('Loan Amort', 0), errors='coerce').fillna(0)
+        claimed_inc = pd.to_numeric(raw_df.get('Claimed Income', np.nan), errors='coerce')
+        bv_inc = pd.to_numeric(raw_df.get('BV Income', np.nan), errors='coerce')
+        ev_inc = pd.to_numeric(raw_df.get('EV Income', np.nan), errors='coerce')
+        terms = pd.to_numeric(raw_df.get('Payment Terms', 0), errors='coerce').fillna(0)
+        price_gap = pd.to_numeric(raw_df.get('Price Gap', 0), errors='coerce').fillna(0)
+
+        # Fallback to BV or EV income when claimed income is missing
+        effective_inc = claimed_inc.replace(0, np.nan).fillna(bv_inc).fillna(ev_inc)
+        dti = amort / effective_inc.replace(0, np.nan)
+        bv_m = bv_inc.isna()
+        ev_m = ev_inc.isna()
+        full_m = bv_m & ev_m & claimed_inc.isna()
+
+        hazard = np.zeros(len(raw_df))
+
+        # --- Pillar 1: Unsecured Personal Loans (Collateral-Free Exposure) ---
+        hazard[is_pl & (amt >= 250000) & (dp == 0) & full_m] += 0.40
+        hazard[is_pl & (amt >= 350000) & (dp == 0) & (~full_m)] += 0.25
+        hazard[is_pl & (amt < 250000) & full_m] += 0.20
+
+        # --- Pillar 2: Severe Debt-to-Income (DTI) & Cash Flow Distress ---
+        # Extreme DTI >= 65%:
+        hazard[dti >= 0.65] += 0.35
+        # High DTI 50% - 65%:
+        hazard[(dti >= 0.50) & (dti < 0.65)] += 0.20
+        # Elevated DTI >= 40% with extended term (>= 48m) or underwater asset:
+        hazard[(dti >= 0.40) & (terms >= 48) & (price_gap < -40000)] += 0.15
+
+        # --- Pillar 3: Zero Bureau Verified Income with Substantial Debt ---
+        hazard[(bv_inc == 0.0) & (amort > 10000)] += 0.25
+
+        # High amortization with completely missing income:
+        hazard[claimed_inc.isna() & bv_inc.isna() & (amort > 20000)] += 0.20
+
+        # --- Pillar 4: Severe Underwater Asset Shortfall WITH Low Downpayment ---
+        # Only penalize severe price gap if equity is low (< 15% DP) or DTI is high
+        low_equity = (dp / amt.replace(0, np.nan)) < 0.15
+        hazard[(price_gap < -80000) & (terms >= 48) & (low_equity | (dti >= 0.45))] += 0.15
+
+        # --- Compound Triple Distress Multiplier ---
+        triple_distress = (dti >= 0.60) & (terms >= 48) & (price_gap < -40000)
+        hazard[triple_distress] += 0.15
+
+        adjusted = np.clip(probs + hazard, 0.0, 0.99)
+        return adjusted
+
+    def predict_dpd_batch(self, rows: List[Dict[str, Any]], risk_probs: Optional[np.ndarray] = None) -> np.ndarray:
+        """Predict expected DPD using delinquency probability and severity."""
         if not rows:
             return np.asarray([], dtype=float)
+        raw_df = pd.DataFrame(rows)
+        if risk_probs is None:
+            risk_probs = self.predict_from_features_batch(rows)
+
+        if getattr(self, 'dpd_model', None) is None:
+            raise RuntimeError('The trained DPD severity model is unavailable.')
+        frame = self.process_data(raw_df, inference=True)
+        encoded = self._encode_processed_harish_input(frame)
+        severity = np.clip(self.dpd_model.predict(encoded[self.features]), 0.0, 365.0)
+        probabilities = np.asarray(risk_probs, dtype=float)
+        threshold = getattr(self, 'decision_threshold', 0.5)
+        expected = np.where(probabilities >= threshold, severity, probabilities * severity)
+        return np.round(np.clip(expected, 0.0, 365.0), 1)
+
+    def predict_dpd_category_batch(self, rows: List[Dict[str, Any]]) -> np.ndarray:
+        """Predict the DPD severity category independently of actual DPD."""
+        if not rows:
+            return np.asarray([], dtype=object)
+        if getattr(self, 'dpd_category_model', None) is None:
+            raise RuntimeError('The trained DPD category model is unavailable.')
         frame = self.process_data(pd.DataFrame(rows), inference=True)
         encoded = self._encode_processed_harish_input(frame)
-        return self.model.predict_proba(encoded)[:, 1]
+        category_ids = self.dpd_category_model.predict(encoded[self.features]).astype(int)
+        return np.asarray([self.DPD_CATEGORY_LABELS[i] for i in category_ids], dtype=object)
+
+    def predict_dpd(self, row_dict: Dict[str, Any]) -> float:
+        """Predict expected Days Past Due (DPD) in days for a single application."""
+        return float(self.predict_dpd_batch([row_dict])[0])
+
+    def predict_from_features_batch(self, rows: List[Dict[str, Any]]) -> np.ndarray:
+        """Predict UI-normalized rows while batching the fitted imputer and underwriting policy."""
+        if not rows:
+            return np.asarray([], dtype=float)
+        raw_df = pd.DataFrame(rows)
+        frame = self.process_data(raw_df, inference=True)
+        encoded = self._encode_processed_harish_input(frame)
+        raw_probs = self.model.predict_proba(encoded)[:, 1]
+        return self._apply_underwriting_policy_layer(raw_df, raw_probs)
 
     def _train_and_cache(self, data: pd.DataFrame, excel_sig: str) -> None:
         if 'Target' not in data.columns:
@@ -740,9 +874,7 @@ class AIModel:
         threshold_model = CalibratedClassifierCV(estimator=model, method='isotonic', cv=5)
         threshold_model.fit(train_encoded, train_target)
         probabilities = threshold_model.predict_proba(val_encoded)[:, 1]
-        fpr, _, thresholds = roc_curve(val_target, probabilities)
-        valid = np.where(fpr <= 0.035)[0]
-        threshold = float(thresholds[valid[-1]]) if len(valid) else 0.5
+        threshold = self._select_decision_threshold(val_target, probabilities)
 
         final_train = pd.concat([train_encoded, val_encoded], ignore_index=True)
         final_target = pd.concat([train_target, val_target], ignore_index=True)
@@ -753,15 +885,100 @@ class AIModel:
         final_model.fit(final_train, final_target)
         auc = float(roc_auc_score(test_target, final_model.predict_proba(test_encoded)[:, 1]))
 
+        dpd_train_target = pd.to_numeric(train_data['Longest_DPD'], errors='coerce').fillna(0).clip(lower=0).reset_index(drop=True)
+        dpd_val_target = pd.to_numeric(val_data['Longest_DPD'], errors='coerce').fillna(0).clip(lower=0).reset_index(drop=True)
+        dpd_params = {
+            key: value for key, value in self.HARISH_BEST_PARAMS.items()
+            if key != 'scale_pos_weight'
+        }
+        positive_train = dpd_train_target > 1
+        positive_final_target = pd.concat([dpd_train_target, dpd_val_target], ignore_index=True)
+        positive_final = positive_final_target > 1
+        dpd_model = LGBMRegressor(
+            **dpd_params,
+            objective='regression_l1',
+            random_state=42,
+            verbose=-1,
+            deterministic=True,
+            force_row_wise=True,
+        )
+        dpd_model.fit(train_encoded.loc[positive_train], np.log1p(dpd_train_target.loc[positive_train]))
+        validation_probability = threshold_model.predict_proba(val_encoded)[:, 1]
+        validation_severity = np.clip(np.expm1(dpd_model.predict(val_encoded)), 0.0, 365.0)
+        dpd_threshold = threshold
+        dpd_validation = np.where(
+            validation_probability >= dpd_threshold,
+            validation_severity,
+            validation_probability * validation_severity,
+        )
+        dpd_validation = np.clip(dpd_validation, 0.0, 365.0)
+        dpd_val_target = dpd_val_target.reset_index(drop=True)
+        dpd_mae = float(mean_absolute_error(dpd_val_target, dpd_validation))
+        dpd_final_train = pd.concat([train_encoded, val_encoded], ignore_index=True)
+        final_dpd_model = LGBMRegressor(
+            **dpd_params,
+            objective='regression_l1',
+            random_state=42,
+            verbose=-1,
+            deterministic=True,
+            force_row_wise=True,
+        )
+        final_dpd_model.fit(dpd_final_train.loc[positive_final], np.log1p(positive_final_target.loc[positive_final]))
+
+        def category_target(values: pd.Series) -> pd.Series:
+            return pd.cut(
+                values,
+                bins=[-np.inf, 0, 30, 60, 90, np.inf],
+                labels=False,
+                include_lowest=True,
+            ).astype(int)
+
+        category_train_target = category_target(dpd_train_target)
+        category_val_target = category_target(dpd_val_target)
+        category_final_target = pd.concat(
+            [category_train_target, category_val_target], ignore_index=True
+        )
+        category_params = {
+            key: value for key, value in self.HARISH_BEST_PARAMS.items()
+            if key != 'scale_pos_weight'
+        }
+        category_model = LGBMClassifier(
+            **category_params,
+            objective='multiclass',
+            num_class=len(self.DPD_CATEGORY_LABELS),
+            random_state=42,
+            verbose=-1,
+            deterministic=True,
+            force_row_wise=True,
+        )
+        category_model.fit(train_encoded, category_train_target)
+        final_category_model = LGBMClassifier(
+            **category_params,
+            objective='multiclass',
+            num_class=len(self.DPD_CATEGORY_LABELS),
+            random_state=42,
+            verbose=-1,
+            deterministic=True,
+            force_row_wise=True,
+        )
+        final_category_model.fit(
+            dpd_final_train,
+            category_final_target,
+        )
+
         self.model = final_model
+        self.dpd_model = final_dpd_model
+        self.dpd_category_model = final_category_model
         self.rf = final_model
         self.X_full = final_train.reset_index(drop=True)
         self.categorical_cols = [c for c in self.CATEGORICAL_COLS if c in self.features]
         self.numeric_cols = [c for c in self.features if c not in self.categorical_cols]
         bundle = {
-            'version': 4,
+            'version': self.MODEL_VERSION,
             'excel_sha1': excel_sig,
             'model': final_model,
+            'dpd_model': final_dpd_model,
+            'dpd_category_model': final_category_model,
             'features': self.features,
             'base_features': self.base_features,
             'categorical_cols': self.categorical_cols,
@@ -779,13 +996,57 @@ class AIModel:
             'dealer_dti_cutoff': getattr(self, 'dealer_dti_cutoff', 0.0),
             'decision_threshold': threshold,
             'auc': auc,
+            'dpd_validation_mae': dpd_mae,
             'X_full': self.X_full,
         }
         joblib.dump(bundle, self.model_path, compress=3)
         self._load_bundle(bundle)
 
+    @classmethod
+    def _select_decision_threshold(
+        cls,
+        target: pd.Series,
+        probabilities: np.ndarray,
+    ) -> float:
+        """Select a recall-aware threshold using validation data only.
+
+        The previous policy constrained validation FPR first, which made the
+        classifier too conservative when missed defaults were more costly than
+        manual reviews. F2 weights recall twice as heavily as precision while
+        the precision guard prevents an uncontrolled flood of false positives.
+        """
+        candidate_thresholds = np.unique(
+            np.concatenate(([0.0, 1.0], np.asarray(probabilities, dtype=float)))
+        )
+        candidates = []
+        for candidate in candidate_thresholds:
+            predicted = (probabilities >= candidate).astype(int)
+            precision = precision_score(target, predicted, zero_division=0)
+            if precision >= cls.MIN_VALIDATION_PRECISION:
+                candidates.append(
+                    (
+                        fbeta_score(target, predicted, beta=2, zero_division=0),
+                        precision,
+                        recall_score(target, predicted, zero_division=0),
+                        float(candidate),
+                    )
+                )
+
+        if not candidates:
+            return 0.5
+
+        # Prefer recall-aware F2, then precision, then recall, then the lower
+        # threshold so ties do not silently reduce default detection.
+        _, _, _, threshold = max(
+            candidates,
+            key=lambda item: (item[0], item[1], item[2], -item[3]),
+        )
+        return threshold
+
     def _load_bundle(self, bundle: dict) -> None:
         self.model = bundle.get('model', bundle.get('rf'))
+        self.dpd_model = bundle.get('dpd_model')
+        self.dpd_category_model = bundle.get('dpd_category_model')
         self.rf = self.model
         self.features = bundle['features']
         self.base_features = bundle.get('base_features', self.features)
@@ -816,7 +1077,11 @@ class AIModel:
         if self.X_full is None or len(self.X_full) == 0:
             raise ValueError("No training data available for SHAP explainer")
         X_bg = self.X_full[self.features]
-        explain_model = self.model.calibrated_classifiers_[0].estimator
+        # Extract the underlying LightGBM booster from the first calibrated classifier
+        try:
+            explain_model = self.model.calibrated_classifiers_[0].estimator
+        except (AttributeError, IndexError):
+            explain_model = self.model
         self._explainer = shap.TreeExplainer(explain_model, data=X_bg, model_output='raw')
         return self._explainer
 
@@ -849,8 +1114,8 @@ class AIModel:
 
     def predict_from_features(self, row_dict: Dict[str, Any]) -> float:
         """Return the calibrated probability that the customer defaults."""
-        frame = self._prepare_inference_df(row_dict)
-        return float(self.model.predict_proba(frame)[0, 1])
+        probs = self.predict_from_features_batch([row_dict])
+        return float(probs[0])
 
     def predict_by_index(self, idx: int) -> float:
         if self.X_full is None or idx < 0 or idx >= len(self.X_full):

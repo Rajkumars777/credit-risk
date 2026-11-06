@@ -17,25 +17,101 @@ from src.backend.users import ensure_user_store, authenticate
 from src.frontend.admin_dashboard import AdminDashboard
 import pandas as pd
 
+
+def read_csv_safe(path: str, **kwargs) -> pd.DataFrame:
+    """Read a CSV or Excel file trying appropriate parsers, encodings, and separators.
+
+    Handles:
+    1. Excel files (XLSX / XLS / OLE2 / ZIP) even if misnamed with a .csv extension.
+    2. Encoding errors (UnicodeDecodeError) - Excel on Windows saves CSV in cp1252 or utf-8.
+    3. Tokenization errors (ParserError) - mismatched number of fields per row,
+       wrong delimiter (semicolon, tab vs comma), or unquoted commas in values.
+    """
+    # --- Step 1: Detect if file is an Excel binary workbook (XLSX zip container or legacy XLS) ---
+    try:
+        with open(path, "rb") as f:
+            magic = f.read(8)
+        # b"PK\x03\x04" is ZIP / XLSX; b"\xd0\xcf\x11\xe0" is legacy XLS (OLE2 Compound Document)
+        if magic.startswith(b"PK\x03\x04") or magic.startswith(b"\xd0\xcf\x11\xe0"):
+            return pd.read_excel(path)
+    except Exception:
+        pass
+
+    # --- Step 2: Check standard Excel extension ---
+    if path.lower().endswith((".xlsx", ".xls", ".xlsm")):
+        try:
+            return pd.read_excel(path)
+        except Exception:
+            pass
+
+    # --- Step 3: Text CSV parsing strategies ---
+    encodings = ["utf-8-sig", "utf-8", "cp1252", "latin-1"]
+    last_err: Exception = RuntimeError("No encodings tried")
+
+    # Pass 1: standard comma-separated, each encoding
+    for enc in encodings:
+        try:
+            return pd.read_csv(path, encoding=enc, **kwargs)
+        except UnicodeDecodeError as exc:
+            last_err = exc
+        except Exception as exc:          # ParserError or other tokenization issues
+            last_err = exc
+
+    # Pass 2: auto-detect separator (handles ; and \t delimited files)
+    for enc in encodings:
+        try:
+            return pd.read_csv(path, encoding=enc, sep=None, engine="python", **kwargs)
+        except UnicodeDecodeError as exc:
+            last_err = exc
+        except Exception as exc:
+            last_err = exc
+
+    # Pass 3: skip bad lines as last resort
+    for enc in encodings:
+        try:
+            return pd.read_csv(
+                path, encoding=enc, sep=None, engine="python",
+                on_bad_lines="skip", **kwargs
+            )
+        except UnicodeDecodeError as exc:
+            last_err = exc
+        except Exception as exc:
+            last_err = exc
+
+    # Pass 4: Final fallback attempt to read via Excel in case file was an Excel file
+    try:
+        return pd.read_excel(path)
+    except Exception:
+        pass
+
+    raise last_err
+
+
+
 class PlaceholderEntry(tk.Entry):
+    """Entry widget that shows a greyed-out placeholder when empty."""
+
     def __init__(self, master=None, placeholder="", color="grey", **kwargs):
+        # Extract 'show' before passing to super so we can toggle it
+        self._real_show = kwargs.pop("show", "")
         super().__init__(master, **kwargs)
         self.placeholder = placeholder
         self.placeholder_color = color
-        self.default_fg = self['fg']
+        self.default_fg = self["fg"]
         self.bind("<FocusIn>", self._clear)
         self.bind("<FocusOut>", self._show)
         self._show()
 
     def _show(self, *_):
-        if not self.get():
-            self.configure(fg=self.placeholder_color)
+        if not self.get() or self["fg"] == self.placeholder_color:
+            # Show placeholder: disable masking so text is readable
+            self.configure(show="", fg=self.placeholder_color)
             self.delete(0, tk.END)
             self.insert(0, self.placeholder)
 
     def _clear(self, *_):
-        if self['fg'] == self.placeholder_color:
-            self.configure(fg=self.default_fg)
+        if self["fg"] == self.placeholder_color:
+            self.configure(show=self._real_show, fg=self.default_fg)
             self.delete(0, tk.END)
 
 class App(tk.Tk):
@@ -66,6 +142,7 @@ class App(tk.Tk):
         # Defer heavy work to a background thread
         self.ai = None
         self.logo = None
+        self._cached_local_df = None
         threading.Thread(target=self._heavy_init, daemon=True).start()
 
     def _heavy_init(self):
@@ -95,10 +172,10 @@ class App(tk.Tk):
         self.db_row = None
         self.ai_features = None
         self.contract_date_defaulted = False
-        self._edit_entry = None
+        self._edit_entry = None  # inline editor widget
         self._editing = {"item": None, "column": None}
 
-        # Build UI (your existing routines)
+        # Build UI
         self._build_scoring()
         self.scoring_frame.place_forget()
         self._build_login()
@@ -107,31 +184,6 @@ class App(tk.Tk):
         if self.splash and self.splash.winfo_exists():
             self.splash.destroy()
         self.deiconify()
-
-        self.title("JACCS Credit Scoring System")
-        self.configure(bg=self.BG_GRAY)
-        self.geometry("800x850")
-        self.resizable(True, True)
-
-        # 1) load & train AI model (already done in _heavy_init)
-        # self.ai is already set
-
-        # 2) load logo
-        logo_file = resource_path("src/data/img/logo.png")
-        img = Image.open(logo_file).resize((180, 70), Image.LANCZOS)
-        self.logo = ImageTk.PhotoImage(img)
-
-        # state
-        self.db_row = None
-        self.ai_features = None
-        self.contract_date_defaulted = False
-        self._edit_entry = None  # inline editor widget
-        self._editing = {"item": None, "column": None}
-
-        # 3) build UI
-        self._build_scoring()
-        self.scoring_frame.place_forget()
-        self._build_login()
 
     def _decorate(self, w):
         w.configure(
@@ -222,8 +274,15 @@ class App(tk.Tk):
         self._batch_results = []
         self._batch_file_path.set("")
 
-        file_path = filedialog.askopenfilename(title="Select CSV",
-                                               filetypes=[("CSV file", "*.csv")])
+        file_path = filedialog.askopenfilename(
+            title="Select Data File",
+            filetypes=[
+                ("All supported (*.csv;*.xlsx;*.xls)", "*.csv;*.xlsx;*.xls"),
+                ("CSV file (*.csv)", "*.csv"),
+                ("Excel file (*.xlsx;*.xls)", "*.xlsx;*.xls"),
+                ("All files (*.*)", "*.*"),
+            ],
+        )
         if file_path:
             self._batch_file_path.set(file_path)
             if hasattr(self, "_batch_path_entry"):
@@ -238,18 +297,14 @@ class App(tk.Tk):
             file_path = self._batch_path_entry.get().strip()
 
         if not file_path:
-            return messagebox.showwarning("Missing Path", "Please select or type the CSV file path.")
+            return messagebox.showwarning("Missing Path", "Please select or type the file path.")
 
         if not os.path.exists(file_path):
             return messagebox.showerror("File Not Found", f"Cannot find file:\n{file_path}")
 
         try:
-            if file_path.endswith(".xlsx"):
-                df = pd.read_excel(file_path)
-                print('read xlsx file')
-            else:
-                df = pd.read_csv(file_path)
-                print('read csv file')
+            df = read_csv_safe(file_path)
+            print('read file successfully')
         except Exception as e:
             return messagebox.showerror("Load Error", f"Could not load file:\n{e}")
 
@@ -452,8 +507,54 @@ class App(tk.Tk):
                         continue
                     except Exception:
                         pass
+            elif key == 'Contract Start Date' and value is not None and not (isinstance(value, float) and pd.isna(value)):
+                try:
+                    coerced[key] = pd.to_datetime(value).strftime('%Y-%m-%d')
+                    continue
+                except Exception:
+                    pass
             coerced[key] = value
         return coerced
+
+    def _get_local_dataset(self):
+        """Load and cache local dataset from src/data for offline lookup."""
+        cached = self.__dict__.get("_cached_local_df") if hasattr(self, "__dict__") else None
+        if cached is not None:
+            return cached
+        candidates = [
+            os.path.join(project_root, "src", "data", "Extracted New.csv"),
+            os.path.join(project_root, "src", "data", "Extracted New.xlsx"),
+            os.path.join(project_root, "src", "data", "May 12 Status Contracts.xlsx"),
+            os.path.join(project_root, "src", "data", "May 12 Status Contracts.csv"),
+        ]
+        for p in candidates:
+            if os.path.exists(p):
+                try:
+                    df = read_csv_safe(p)
+                    if not df.empty:
+                        self._cached_local_df = df
+                        return df
+                except Exception:
+                    pass
+        return None
+
+    def _find_row_by_party_and_app(self, df, party_no, app_no):
+        """Find row in DataFrame matching Party No and Application No."""
+        if df is None or df.empty:
+            return None
+        p_col = next((c for c in df.columns if str(c).strip().lower() in ['party no', 'party_no', 'partyno']), None)
+        a_col = next((c for c in df.columns if str(c).strip().lower() in ['application no', 'application_no', 'applicationno', 'app no', 'app_no']), None)
+        if not p_col or not a_col:
+            return None
+        try:
+            p_match = pd.to_numeric(df[p_col], errors='coerce') == int(party_no)
+            a_match = pd.to_numeric(df[a_col], errors='coerce') == int(app_no)
+            matched = df[p_match & a_match]
+            if not matched.empty:
+                return matched.iloc[0].to_dict()
+        except Exception:
+            pass
+        return None
 
     def fetch_customer(self):
         # Clear previous
@@ -475,54 +576,99 @@ class App(tk.Tk):
         self.ai_features = None
         self.contract_date_defaulted = False
 
+        # Read optional Party No and Application No entered by user
+        party_txt = self.ent_party.get().strip() if hasattr(self, "ent_party") else ""
+        app_txt = self.ent_app.get().strip() if hasattr(self, "ent_app") else ""
+        if party_txt.lower().startswith("party no"):
+            party_txt = ""
+        if app_txt.lower().startswith("application no"):
+            app_txt = ""
+
+        party_no = None
+        application_no = None
+        if party_txt and app_txt:
+            try:
+                party_no = int(party_txt)
+                application_no = int(app_txt)
+            except ValueError:
+                pass
+
         # if uploaded data of user then, 
         if self.csv_mode.get():
-            # Load from CSV
-            csv_path = filedialog.askopenfilename(title="Select CSV file", filetypes=[("CSV files", "*.csv")])
+            # Load from CSV / Excel
+            data_dir = os.path.join(project_root, "src", "data")
+            initial_dir = data_dir if os.path.exists(data_dir) else project_root
+            csv_path = filedialog.askopenfilename(
+                title="Select Data File",
+                initialdir=initial_dir,
+                filetypes=[
+                    ("All supported data files (*.csv;*.xlsx;*.xls)", "*.csv;*.xlsx;*.xls"),
+                    ("CSV files (*.csv)", "*.csv"),
+                    ("Excel files (*.xlsx;*.xls)", "*.xlsx;*.xls"),
+                    ("All files (*.*)", "*.*"),
+                ],
+            )
             if not csv_path:
                 return
             try:
-                df = pd.read_csv(csv_path)
+                df = read_csv_safe(csv_path)
                 if df.empty:
-                    return messagebox.showerror("CSV Error", "CSV file is empty.")
-                
-                # Apply same preprocessing as training data
-                if 'Longest DPD' in df.columns:
-                    df['Original Longest DPD'] = df['Longest DPD']
-                    df['Longest DPD'] = df['Longest DPD'].apply(self.ai.quantize_longest_dpd)
-                
-                needed_cols = self.ai.features + ["Original Longest DPD", "Longest DPD"] if 'Longest DPD' in df.columns else self.ai.features
-                df = df[needed_cols] if all(col in df.columns for col in needed_cols) else df
-                
-                if "Contract Start Date" in df.columns:
-                    df['Contract Start Date'] = pd.to_datetime(df['Contract Start Date'], format='%m/%d/%Y', errors='coerce')
-                    df['Contract Start Date'].fillna(pd.Timestamp(0), inplace=True)
-                    df['Contract Start Date'] = df['Contract Start Date'].astype(int) / 10**9
-                
-                numerical_cols = [c for c in self.ai.features if c not in self.ai.categorical_cols]
-                for col in numerical_cols:
-                    if col in df.columns:
-                        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0).astype(float)
-                
-                df.drop_duplicates(inplace=True)
-                
-                if len(df) > 1:
-                    messagebox.showwarning("Multiple Rows", f"CSV contains {len(df)} rows. Only the first row will be processed for inference.")
-                
-                # Use the first row as the data
-                row = df.iloc[0].to_dict()
+                    return messagebox.showerror("File Error", "The file is empty.")
+
+                # Check if user accidentally selected an export results file (e.g. test_results.csv)
+                cols_lower = [str(c).strip().lower() for c in df.columns]
+                if "predicted risk" in cols_lower and "credit score" in cols_lower:
+                    return messagebox.showerror(
+                        "Invalid File Selected",
+                        f"The selected file '{os.path.basename(csv_path)}' is an output predictions report, not an input customer file.\n\n"
+                        "Please select an input data file containing customer features, such as:\n"
+                        "  • src/data/Extracted New.csv\n"
+                        "  • test_data/SingleTest.csv"
+                    )
+
+                df = df.drop_duplicates()
+
+                # If user entered Party No & App No, search for that specific record in the file
+                row = None
+                if party_no is not None and application_no is not None:
+                    row = self._find_row_by_party_and_app(df, party_no, application_no)
+                    if row is None:
+                        messagebox.showwarning(
+                            "Record Not Found in File",
+                            f"No record matching Party No: {party_no} and Application No: {application_no} "
+                            f"found in {os.path.basename(csv_path)}.\n\nUsing the first row in the file instead."
+                        )
+
+                if row is None:
+                    if len(df) > 1:
+                        messagebox.showinfo(
+                            "Multiple Rows",
+                            f"File contains {len(df)} rows. Using row 1 for inference.\n\n"
+                            "Tip: You can enter Party No and Application No in the input fields above to select any specific customer."
+                        )
+                    row = df.iloc[0].to_dict()
+
+                # --- Validate that the file has recognisable feature columns (direct or alias) ---
+                csv_cols = set(str(c).strip() for c in df.columns)
+                matched = csv_cols & set(self.ai.RAW_INPUT_FEATURES)
+                normalized_preview = self._normalize_input_row(row)
+                if not matched and not normalized_preview:
+                    preview = ', '.join(sorted(csv_cols)[:8])
+                    if len(csv_cols) > 8:
+                        preview += '…'
+                    return messagebox.showerror(
+                        "File Error",
+                        "The selected file has no recognised feature columns.\n\n"
+                        "Expected columns such as:\n"
+                        "  Amount Finance, Downpayment, DSCR, Interest Rate …\n\n"
+                        f"Found: {preview}"
+                    )
+
                 self.db_row = self._coerce_csv_row(row)
             except Exception as e:
-                return messagebox.showerror("CSV Error", f"Failed to load CSV: {e}")
+                return messagebox.showerror("File Error", f"Failed to load file: {e}")
         else:
-            # Original DB fetch
-            party_txt = self.ent_party.get().strip()
-            app_txt = self.ent_app.get().strip()
-            if party_txt.lower().startswith("party no"):
-                party_txt = ""
-            if app_txt.lower().startswith("application no"):
-                app_txt = ""
-
+            # Original DB fetch with automatic fallback to local dataset
             if not party_txt or not app_txt:
                 return messagebox.showwarning("Missing", "Please enter Party No and Application No.")
 
@@ -532,15 +678,31 @@ class App(tk.Tk):
             except ValueError:
                 return messagebox.showerror("Invalid", "Party No and Application No must be integers.")
 
+            row = None
+            db_error = None
             try:
                 row = fetch_ci_mock_crifv4(party_no, application_no)
             except Exception as e:
-                return messagebox.showerror("DB Error", f"Failed to fetch: {e}")
+                db_error = e
+
+            # If DB lookup failed or returned no row, fallback to local data in src/data/
+            if not row:
+                local_df = self._get_local_dataset()
+                if local_df is not None:
+                    row = self._find_row_by_party_and_app(local_df, party_no, application_no)
+                    if row:
+                        print(f"[Local Dataset] Loaded Party No: {party_no}, App No: {application_no} from local data file.")
 
             if not row:
-                return messagebox.showinfo("No Data", "No matching record found.")
+                if db_error:
+                    return messagebox.showerror(
+                        "Record Not Found",
+                        f"Database is unavailable ({db_error}) and record for Party No: {party_no}, "
+                        f"Application No: {application_no} was not found in local data (src/data/Extracted New.csv)."
+                    )
+                return messagebox.showinfo("No Data", f"No matching record found for Party No: {party_no}, Application No: {application_no}.")
 
-            self.db_row = row
+            self.db_row = self._coerce_csv_row(row)
 
         self.ai_features = self._row_to_ai_features(self.db_row)
 
@@ -736,7 +898,7 @@ class App(tk.Tk):
             self.btn_breakdown.grid(row=0, column=4, sticky="w", ipadx=10, ipady=6, padx=(0, 0))
             self.btn_breakdown_is_packed = True
 
-        messagebox.showinfo("AI Prediction", "Prediction complete.")
+        messagebox.showinfo("AI Prediction", "Prediction complete.\n\nNote: Probability reflects risk of ANY DPD occurrence (even small overdue amounts are captured).")
 
     def _show_breakdown_dialog(self):
         if not self.ai_features:
@@ -763,7 +925,7 @@ class App(tk.Tk):
             tk.Label(frm, text=val, bg="white", fg="#000", font=font.Font(size=12, weight="bold")).pack(anchor="w")
 
         lab("Base value", f"{result['base_value']:.4f}")
-        lab("Predicted Default Risk", f"{result['prediction']}")  # Changed to Descreate visualization.
+        lab("Predicted Any-DPD Risk", f"{result['prediction']}")  # Any DPD detection (DPD > 0)
         lab("Base + ΣSHAP", f"{result['reconstructed']:.4f}")
 
         # Table with contributions
@@ -843,9 +1005,12 @@ class App(tk.Tk):
         btnfrm.pack(pady=12)
         def save():
             newcfg = {k: e.get().strip() for k, e in entries.items()}
-            save_config(newcfg)
-            messagebox.showinfo("Settings", "Database configuration saved.")
-            top.destroy()
+            try:
+                save_config(newcfg)
+                messagebox.showinfo("Settings", "Database configuration saved.")
+                top.destroy()
+            except Exception as exc:
+                messagebox.showerror("Save Error", f"Could not save config:\n{exc}")
 
         btn_save = tk.Button(btnfrm, text="Save", command=save,
                         bg=self.GREEN, fg="black",
@@ -860,7 +1025,7 @@ class App(tk.Tk):
         btn_cancel.pack(side="left", ipadx=10, ipady=4, padx=10)
         self._decorate(btn_cancel)
 
-    # —— 'Mutiple' CREDIT SCORING SCREEN —— #
+    # —— 'Multiple' CREDIT SCORING SCREEN —— #
     def _batch_processing(self):
         self.geometry("950x850")
         if hasattr(self, 'scoring_frame'):
@@ -873,9 +1038,6 @@ class App(tk.Tk):
 
         card = tk.Frame(self.multiple_frame, bg='white')
         card.place(relx=0.5, rely=0.5, anchor='center', width=900, height=780)
-
-        tk.Label(card, text="Credit Score Calculator", bg="white", fg=self.GREEN,
-                 font=font.Font(size=18, weight="bold")).pack(pady=(0, 15))
 
         self._batch_file_path = tk.StringVar()  # reacts to file selection
         self._batch_df = None                   # raw uploaded dataframe
@@ -958,13 +1120,12 @@ class App(tk.Tk):
         # Choose processing method based on connection availability
         if conn is not None:
             self._batch_featch_data_db(conn)
-
-        # -- For testing -- Batch processing with no DB access "findme"
-        # else:
-            # self._batch_featch_data_fallback()
+        else:
+            # Fallback: use uploaded row data directly (no DB lookup needed)
+            self._batch_featch_data_fallback()
 
         # -- Process status popup window
-        cnt = len([r for r in self._batch_results if r.get("Predicted DPD") is not None])
+        cnt = len([r for r in self._batch_results if r.get("Predicted DPD (Any)") is not None])
         messagebox.showinfo("Batch Processing", f"Processed {cnt} / {len(self._batch_results)} records.")
         self._render_batch_results_table()
 
@@ -984,7 +1145,7 @@ class App(tk.Tk):
                 "Application No": app_no,
                 "Party No": party_no,
                 "AI Predicted Probability": None,
-                "Predicted DPD": None,
+                "Predicted DPD (Any)": None,
                 "Credit Score": None,
                 "Base Value": None,
                 "Reconstructed": None,
@@ -1015,7 +1176,7 @@ class App(tk.Tk):
         # -- Fallback to sample_data.csv for testing 
         sample_df = None
         try:
-            sample_df = pd.read_csv(resource_path("test_data\sample_data.csv"))
+            sample_df = pd.read_csv(resource_path("test_data/sample_data.csv"))
         except Exception:
             sample_df = None
 
@@ -1031,7 +1192,7 @@ class App(tk.Tk):
                 "Application No": app_no,
                 "Party No": party_no,
                 "AI Predicted Probability": None,
-                "Predicted DPD": None,
+                "Predicted DPD (Any)": None,
                 "Credit Score": None,
                 "Base Value": None,
                 "Reconstructed": None,
@@ -1059,10 +1220,11 @@ class App(tk.Tk):
         
         try:
             ai_pred = self.ai.predict_from_features(feats)
-            df = self.ai._prepare_inference_df(feats)
-            predicted_dpd = int(self.ai.rf.predict(df[self.ai.features])[0])
+            # Classify as default (1) or good (0) using the model's calibrated threshold
+            threshold = getattr(self.ai, 'decision_threshold', 0.5)
+            predicted_dpd = int(ai_pred >= threshold)  # 1 = any DPD likely, 0 = clean
             result["AI Predicted Probability"] = round(ai_pred, 6)
-            result["Predicted DPD"] = predicted_dpd
+            result["Predicted DPD (Any)"] = predicted_dpd
             result["Credit Score"] = round((1 - ai_pred) * 100.0, 2)
         except Exception as e:
             result["Status"] = f"Predict error: {e}"
@@ -1117,7 +1279,7 @@ class App(tk.Tk):
         self._decorate(save_btn)
 
 
-        columns = ["Application No", "Party No", "AI Predicted Probability", "Predicted DPD", "Credit Score", "Base Value", "Reconstructed", "Status"]
+        columns = ["Application No", "Party No", "AI Predicted Probability", "Predicted DPD (Any)", "Credit Score", "Base Value", "Reconstructed", "Status"]
 
         # Dedicated frame for Treeview and scrollbars
         table_frame = tk.Frame(self._batch_table_frame, bg='white')
@@ -1169,7 +1331,7 @@ class App(tk.Tk):
         failed = 0
         saved_files = []
         for rec in self._batch_results:
-            predicted = rec.get("Predicted DPD")
+            predicted = rec.get("Predicted DPD (Any)")
             if predicted is None:
                 continue
 
@@ -1186,7 +1348,7 @@ class App(tk.Tk):
                 header = [
                     ["Application No", app_no],
                     ["Party No", party_no],
-                    ["Prediction", predicted],
+                    ["Predicted DPD (Any)", predicted],  # 1=any DPD, 0=clean
                     ["Credit Score", rec.get("Credit Score")],
                     ["Base Value", rec.get("Base Value")],
                     ["Reconstructed", rec.get("Reconstructed")],
@@ -1244,7 +1406,7 @@ class App(tk.Tk):
             
             # Sheet 1: Summary table (from _render_batch_results_table)
             summary_sheet = wb.create_sheet("Summary", 0)
-            columns = ["Application No", "Party No", "AI Predicted Probability", "Predicted DPD", "Credit Score", "Base Value", "Reconstructed", "Status"]
+            columns = ["Application No", "Party No", "AI Predicted Probability", "Predicted DPD (Any)", "Credit Score", "Base Value", "Reconstructed", "Status"]
             
             # Write header with formatting
             header_fill = PatternFill(start_color="2E7D32", end_color="2E7D32", fill_type="solid")
@@ -1259,13 +1421,13 @@ class App(tk.Tk):
             
             # Write summary data rows
             for row_idx, rec in enumerate(self._batch_results, 2):
-                if rec.get("Predicted DPD") is None:
+                if rec.get("Predicted DPD (Any)") is None:
                     continue
                 
                 summary_sheet.cell(row=row_idx, column=1).value = rec.get("Application No")
                 summary_sheet.cell(row=row_idx, column=2).value = rec.get("Party No")
                 summary_sheet.cell(row=row_idx, column=3).value = rec.get("AI Predicted Probability")
-                summary_sheet.cell(row=row_idx, column=4).value = rec.get("Predicted DPD")
+                summary_sheet.cell(row=row_idx, column=4).value = rec.get("Predicted DPD (Any)")
                 summary_sheet.cell(row=row_idx, column=5).value = rec.get("Credit Score")
                 summary_sheet.cell(row=row_idx, column=6).value = rec.get("Base Value")
                 summary_sheet.cell(row=row_idx, column=7).value = rec.get("Reconstructed")
@@ -1284,7 +1446,7 @@ class App(tk.Tk):
             
             # Sheets 2+: Detailed breakdown for each record
             for rec in self._batch_results:
-                predicted = rec.get("Predicted DPD")
+                predicted = rec.get("Predicted DPD (Any)")
                 if predicted is None:
                     continue
                 
@@ -1299,7 +1461,7 @@ class App(tk.Tk):
                 detail_sheet.cell(row=1, column=2).value = app_no
                 detail_sheet.cell(row=2, column=1).value = "Party No"
                 detail_sheet.cell(row=2, column=2).value = party_no
-                detail_sheet.cell(row=3, column=1).value = "Predicted DPD"
+                detail_sheet.cell(row=3, column=1).value = "Predicted DPD (Any)"
                 detail_sheet.cell(row=3, column=2).value = predicted
                 detail_sheet.cell(row=4, column=1).value = "Credit Score"
                 detail_sheet.cell(row=4, column=2).value = rec.get("Credit Score")

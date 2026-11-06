@@ -44,7 +44,14 @@ def ensure_user_store():
     """
     if os.path.exists(USERS_CSV):
         return
-    add_user("admin@example.com", "password123", role="admin")
+    initial_password = os.getenv("JACCS_DEFAULT_ADMIN_PASSWORD")
+    if not initial_password:
+        initial_password = secrets.token_urlsafe(16)
+        print(
+            "[Users] Generated a temporary admin password. "
+            "Set JACCS_DEFAULT_ADMIN_PASSWORD to choose one explicitly."
+        )
+    add_user("admin@example.com", initial_password, role="admin")
 
 def _read_all() -> List[Dict[str,str]]:
     if not os.path.exists(USERS_CSV):

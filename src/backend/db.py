@@ -42,10 +42,10 @@ def _get_config_path() -> str:
 CONFIG_PATH = _get_config_path()
 
 DEFAULT_CONFIG = {
-    "server": "TEST-DB",
-    "database": "dbAAFS_MAFS",
-    "user": "jaccsadmin",
-    "password": "J@ccs@admin",
+    "server": "",
+    "database": "",
+    "user": "",
+    "password": "",
     "driver": "{ODBC Driver 17 for SQL Server}",
 }
 
@@ -114,8 +114,8 @@ def save_config(cfg: dict):
             json.dump(cfg_to_save, f, indent=4)
         print(f"Config saved to: {CONFIG_PATH}")
     except Exception as e:
-        # silently ignore write errors
-        pass
+        print(f"[DB] Warning: Failed to save config ({e}).")
+        raise
 
 def _resolve_driver(driver_name=None):
     installed = pyodbc.drivers()
@@ -193,6 +193,21 @@ def get_connection(
     user = user or cfg.get("user")
     password = password or cfg.get("password")
     driver = driver or cfg.get("driver")
+
+    missing = [
+        name for name, value in (
+            ("server", server),
+            ("database", database),
+            ("user", user),
+            ("password", password),
+        )
+        if not value
+    ]
+    if missing:
+        raise RuntimeError(
+            "Database configuration is incomplete. Set the missing values in "
+            f"{CONFIG_PATH}: {', '.join(missing)}"
+        )
 
     conn_str = (
         f"DRIVER={driver};SERVER={server};DATABASE={database};"
