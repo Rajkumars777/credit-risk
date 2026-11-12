@@ -1,11 +1,25 @@
 # -*- mode: python ; coding: utf-8 -*-
+import os
+from pathlib import Path
 
+PROJECT_ROOT = Path(__file__).resolve().parent
+
+model_path = PROJECT_ROOT / "src" / "backend" / "models" / "May 12 Status Contracts_Extracted New_lgbm.joblib"
+datas = [
+    (str(PROJECT_ROOT / "src"), "src/"),
+    (str(PROJECT_ROOT / "src" / "data" / "img"), "img/"),
+]
+if model_path.exists():
+    datas.append((str(model_path), "src/backend/models/"))
+
+icon_path = PROJECT_ROOT / "ltid_logo.ico"
+icons = [str(icon_path)] if icon_path.exists() else []
 
 a = Analysis(
-    ['D:\\LTID\\credit-scoring-app\\src\\frontend\\main.py'],
-    pathex=[],
+    [str(PROJECT_ROOT / "src" / "frontend" / "main.py")],
+    pathex=[str(PROJECT_ROOT)],
     binaries=[],
-    datas=[('D:\\LTID\\credit-scoring-app\\src', 'src/'), ('D:\\LTID\\credit-scoring-app\\src\\backend\\models\\May 12 Status Contracts_Extracted New_lgbm.joblib', 'src/backend/models/')],
+    datas=datas,
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
@@ -22,18 +36,18 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='main',
+    name="JACCSScore",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=True,
+    console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['D:\\LTID\\credit-scoring-app\\ltid_logo(1).ico'],
+    icon=icons,
 )

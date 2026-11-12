@@ -72,6 +72,53 @@ Enterprise desktop credit risk assessment and credit scoring platform built with
 
 ---
 
+## 📂 Project Structure
+
+```text
+credit-risk/
+├── docs/                        # Technical documentation & executive reports
+│   ├── reports/                 # Word (.docx) and PDF evaluation reports
+│   ├── credit_score_analysis.md # Scoring calculation & distribution analysis
+│   ├── start.md                 # Detailed setup & startup guide
+│   └── README.md                # Documentation index
+├── notebooks/                   # Research prototypes & exploratory EDA notebooks
+│   ├── harish_work_best.ipynb   # Initial LightGBM R&D notebook
+│   └── new_model.py             # Early prototype script
+├── outputs/                     # Generated evaluation workbooks & comparison matrices
+│   ├── Model_Comparison_Raw_vs_Production.xlsx
+│   ├── Production_Optimization_Model_Result.xlsx
+│   ├── Initial_Raw_Model_Result.xlsx
+│   ├── Raw_Jan_Jun_2026_Result.xlsx
+│   └── May_12_Status_Contracts_Result.xlsx
+├── scripts/                     # Standalone CLI tools, training & evaluation scripts
+│   ├── reports/                 # Document & PDF report generators
+│   ├── sql/                     # Database schema definitions (schema.sql)
+│   ├── train_and_save_production_model.py
+│   ├── generate_comparison_excels.py
+│   ├── generate_raw_2026_results.py
+│   └── generate_may_12_results.py
+├── src/                         # Application source code
+│   ├── backend/                 # AI model, database, auth & logging engine
+│   ├── data/                    # Model training datasets & branding assets
+│   │   ├── Extracted New.xlsx
+│   │   ├── May 12 Status Contracts.xlsx
+│   │   └── Raw Jan - Jun 2026.xlsx
+│   └── frontend/                # Tkinter desktop presentation layer
+├── test_data/                   # Sample CSVs for manual & batch testing
+├── tests/                       # Automated pytest test suite (87 tests)
+├── .env.example                 # Environment configuration template
+├── .gitignore                   # Git ignore patterns
+├── config.py                    # Central application configuration
+├── conftest.py                  # Pytest fixtures & setup
+├── ltid_logo.ico                # Application desktop icon
+├── main.spec                    # PyInstaller build specification
+├── pytest.ini                   # Pytest configuration
+├── requirements.txt             # Production & development dependencies
+└── run.ps1                      # PowerShell CLI runner & management script
+```
+
+---
+
 ## 📋 Prerequisites
 
 - **Python**: Version 3.10+ (Recommended: Python 3.12 64-bit)
@@ -134,7 +181,7 @@ Upon first launch with clean storage:
 
 ## 🧪 Automated Test Suite
 
-The system includes 80+ unit and integration tests covering data transformations, underwriting logic, database resiliency, security, and ML pipelines.
+The system includes 87 automated unit and integration tests covering data transformations, underwriting logic, database resiliency, security, and ML pipelines.
 
 ```powershell
 # Run the full test suite

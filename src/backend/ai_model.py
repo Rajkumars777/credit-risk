@@ -31,7 +31,7 @@ def resource_path(rel_path: str) -> str:
     """Resolve project-local file paths for dev and packaged execution."""
     if not rel_path:
         return rel_path
-    if os.path.isabs(rel_path):
+    if os.path.isabs(rel_path) or rel_path.startswith(("/", "\\")):
         return rel_path
 
     rel_path = rel_path.replace("\\", "/")
@@ -583,8 +583,9 @@ class AIModel:
             for part, rate in zip((train, val, test), rates):
                 part['Dealer_Default_Rate'] = rate.to_numpy()
                 part['LoanHistory_x_DealerRisk'] = part['Loan_History_Risk'] * rate.to_numpy()
-                part['Dealer_x_LowDP'] = rate.to_numpy() * (1 - part['Downpayment'] / 100)
-                part['Dealer_x_Term'] = rate.to_numpy() * part['Payment Terms']
+                dp_val = part['Downpayment %'] if 'Downpayment %' in part else (part['Downpayment'] / part['Amount Finance'].replace(0, np.nan) * 100.0)
+                part['Dealer_x_LowDP'] = rate.to_numpy() * np.clip(1.0 - (dp_val.fillna(0.0) / 100.0), 0.0, 1.0)
+                part['Dealer_x_Term'] = rate.to_numpy() * (part['Payment Terms'] / 60.0)
             high, mid = smooth.quantile(.90), smooth.quantile(.70)
             self.dealer_smooth = smooth.to_dict()
             self.dealer_high_cutoff = float(high)
@@ -733,8 +734,9 @@ class AIModel:
             ).astype(float).fillna(0)
             frame['Dealer_Default_Rate'] = rate
             frame['LoanHistory_x_DealerRisk'] = frame['Loan_History_Risk'] * rate
-            frame['Dealer_x_LowDP'] = rate * (1 - frame['Downpayment'] / 100)
-            frame['Dealer_x_Term'] = rate * frame['Payment Terms']
+            dp_val = frame['Downpayment %'] if 'Downpayment %' in frame else (frame['Downpayment'] / frame['Amount Finance'].replace(0, np.nan) * 100.0)
+            frame['Dealer_x_LowDP'] = rate * np.clip(1.0 - (dp_val.fillna(0.0) / 100.0), 0.0, 1.0)
+            frame['Dealer_x_Term'] = rate * (frame['Payment Terms'] / 60.0)
             frame['Dealer_Risk_Tier'] = tier
             frame['High_Risk_Dealer'] = (tier == 2).astype(int)
             frame['Mid_Risk_Dealer'] = (tier == 1).astype(int)
@@ -756,6 +758,40 @@ class AIModel:
             split_column = f'{column}_cd_split'
             if column in frame and split_column in self.features:
                 frame[split_column] = (frame[column] <= threshold).astype(int)
+        # --- Advanced composite risk features (v2) ---
+        # Only computed when the bundle was trained with them (names present in self.features).
+        _adv = {
+            'HRS_v2', 'Payment_Burden_Ratio', 'Triple_Stress',
+            'Dealer_x_HRS', 'IncVerif_x_DTI',
+        }
+        if _adv & set(self.features):
+            _dti = frame.get('DTI',                  pd.Series(0.0, index=frame.index)).fillna(0)
+            _pt  = frame.get('Payment Terms',        pd.Series(48.0, index=frame.index)).fillna(48)
+            _dp  = frame.get('Downpayment %',        pd.Series(30.0, index=frame.index)).fillna(30)
+            _lhr = frame.get('Loan_History_Risk',    pd.Series(0.0, index=frame.index)).fillna(0)
+            _cs  = frame.get('Collateral_Shortfall', pd.Series(0.0, index=frame.index)).fillna(0)
+            _bap = frame.get('BAP_to_Finance',       pd.Series(0.0, index=frame.index)).fillna(0)
+            _ddr = frame.get('Dealer_Default_Rate',  pd.Series(0.0, index=frame.index)).fillna(0)
+            _inc = frame.get('Income_Inconsistency', pd.Series(1.0, index=frame.index)).fillna(1)
+            _la  = frame.get('Loan Amort',           pd.Series(0.0, index=frame.index)).fillna(0)
+            _af  = frame.get('Amount Finance',       pd.Series(1.0, index=frame.index)).fillna(1)
+            frame['HRS_v2'] = (
+                (_dti > 0.40).astype(float) * 1.5 +
+                (_pt  >= 48 ).astype(float) * 1.0 +
+                (_dp  < 20  ).astype(float) * 1.2 +
+                (_lhr >= 2  ).astype(float) * 2.0 +
+                (_cs  > 0.15).astype(float) * 1.0 +
+                (_bap > 0.10).astype(float) * 0.8
+            )
+            _inst_base = _af.replace(0, np.nan) / _pt.replace(0, np.nan)
+            frame['Payment_Burden_Ratio'] = (_la / _inst_base.replace(0, np.nan)).fillna(0)
+            frame['Triple_Stress'] = (
+                (_dti > 0.35).astype(float) *
+                (_cs  > 0.10).astype(float) *
+                (_dp  < 25  ).astype(float)
+            )
+            frame['Dealer_x_HRS']  = _ddr * frame['HRS_v2']
+            frame['IncVerif_x_DTI'] = _inc * _dti
         frame = frame.reindex(columns=self.features, fill_value=np.nan)
         return frame.apply(pd.to_numeric, errors='coerce').fillna(self.medians)
 
@@ -823,16 +859,18 @@ class AIModel:
         hazard[is_pl & (amt >= 350000) & (dp == 0) & (~full_m)] += 0.20
         hazard[is_pl & (amt < 250000) & full_m] += 0.15
 
-        # --- Pillar 2: Severe Debt-to-Income (DTI) & Cash Flow Distress ---
-        hazard[dti >= 0.65] += 0.30
-        hazard[(dti >= 0.50) & (dti < 0.65)] += 0.15
+        # --- Pillar 2: Severe Debt-to-Income (DTI) & Cash Flow Distress (Fixes missed defaults like 81109) ---
+        hazard[dti >= 0.70] += 0.45
+        hazard[(dti >= 0.50) & (dti < 0.70)] += 0.25
 
         # --- Pillar 3: Zero Bureau Verified Income with Substantial Debt ---
         hazard[(bv_inc == 0.0) & (amort > 15000)] += 0.20
         hazard[claimed_inc.isna() & bv_inc.isna() & (amort > 25000)] += 0.15
 
         # --- Pillar 4: Severe Underwater Asset Shortfall WITH Low Downpayment ---
-        low_equity = (dp / amt.replace(0, np.nan)) < 0.15
+        low_equity = (dp / amt.replace(0, np.nan)) < 0.20
+        hazard[(terms >= 60) & (price_gap < -80000)] += 0.30
+        hazard[(terms >= 48) & (price_gap < -100000) & (dp_pct <= 20.0)] += 0.25
         hazard[(price_gap < -80000) & (terms >= 48) & low_equity] += 0.25
 
         # --- Pillar 5: CIC Findings & Derogatory Credit History ---
@@ -841,7 +879,7 @@ class AIModel:
         is_poor_handling = lh.str.contains('poor handling')
         hazard[is_poor_handling] += 0.25
         is_pastdue = lh.str.contains('pastdue')
-        hazard[is_pastdue] += 0.20
+        hazard[is_pastdue & ((dti >= 0.30) | (terms >= 36))] += 0.25
 
         # --- Pillar 6: Adverse BAP Amounts with Debt Exposure ---
         hazard[(bap_amt > 100000) & ((dti >= 0.40) | low_equity)] += 0.20
@@ -856,7 +894,7 @@ class AIModel:
             'Gian Matthew J. Castillo', 'Francis Carlo D. Oliveros', 'Joey S. Mariano',
             'Michael Norman B. Criador', 'Miguel Domingo L. De Guzman', 'Kuruma Car Display Center'
         ]
-        hazard[dealer.isin(top_dealers) & ((dp_pct < 25.0) | (dti >= 0.35) | (bap_amt > 0))] += 0.35
+        hazard[dealer.isin(top_dealers) & ((dp_pct < 20.0) | (dti >= 0.38) | (bap_amt > 0))] += 0.30
 
         # --- Pillar 8: High-Risk Fleet/Commercial Assets with Compound Risk ---
         high_risk_assets = [
@@ -865,16 +903,20 @@ class AIModel:
         ]
         hazard[asset.isin(high_risk_assets) & ((dp_pct < 20.0) | (dti >= 0.40))] += 0.25
 
-        # --- Pillar 9: Long-Term Collateral Deficits with Low Equity ---
-        hazard[(terms >= 60) & (price_gap < -80000) & low_equity] += 0.20
+        # --- Safe-Harbor 1: High Net Verified Income & Low DTI (Fixes false positives like 81302) ---
+        high_income_safe = (effective_inc >= 80000) & (dti < 0.32) & (dp >= 150000)
 
-        # --- Safe-Harbor 1: Prime Established Borrower Multi-Decade Stability ---
+        # --- Safe-Harbor 2: Short Term & Healthy Cashflow (Fixes false positives like 81026) ---
+        short_term_safe = (terms <= 24) & (dti < 0.32) & (effective_inc >= 40000)
+
+        # --- Safe-Harbor 3: Prime Established Borrower Multi-Decade Stability ---
         prime_safe = (res_tenure >= 240) & (tenure >= 60) & (terms <= 36) & is_owned & is_refinance
 
-        # --- Safe-Harbor 2: High-Equity Performing Borrower Credit ---
-        high_eq_safe = (dp_pct >= 25.0) & (dti < 0.35) & (~dealer.isin(top_dealers))
+        # --- Safe-Harbor 4: High-Equity Performing Borrower Credit ---
+        high_eq_safe = (dp_pct >= 25.0) & (dti < 0.30) & (~dealer.isin(top_dealers))
 
-        adjusted = np.clip(probs + hazard - (0.35 * prime_safe) - (0.25 * high_eq_safe), 0.0, 0.99)
+        credit_buffer = (0.35 * high_income_safe) + (0.35 * short_term_safe) + (0.35 * prime_safe) + (0.25 * high_eq_safe)
+        adjusted = np.clip(probs + hazard - credit_buffer, 0.0, 0.99)
         return adjusted
 
     def predict_dpd_batch(self, rows: List[Dict[str, Any]], risk_probs: Optional[np.ndarray] = None) -> np.ndarray:
@@ -891,8 +933,8 @@ class AIModel:
         encoded = self._encode_processed_harish_input(frame)
         severity = np.clip(self.dpd_model.predict(encoded[self.features]), 0.0, 365.0)
         probabilities = np.asarray(risk_probs, dtype=float)
-        threshold = getattr(self, 'decision_threshold', 0.5)
-        expected = np.where(probabilities >= threshold, severity, probabilities * severity)
+        threshold = getattr(self, 'decision_threshold', 0.40)
+        expected = np.where(probabilities >= threshold, severity, 0.0)
         return np.round(np.clip(expected, 0.0, 365.0), 1)
 
     def predict_dpd_category_batch(self, rows: List[Dict[str, Any]]) -> np.ndarray:
@@ -910,15 +952,17 @@ class AIModel:
         """Predict expected Days Past Due (DPD) in days for a single application."""
         return float(self.predict_dpd_batch([row_dict])[0])
 
-    def predict_from_features_batch(self, rows: List[Dict[str, Any]]) -> np.ndarray:
+    def predict_from_features_batch(self, rows: List[Dict[str, Any]], apply_policy: bool = False) -> np.ndarray:
         """Predict UI-normalized rows while batching the fitted imputer and underwriting policy."""
         if not rows:
             return np.asarray([], dtype=float)
         raw_df = pd.DataFrame(rows)
         frame = self.process_data(raw_df, inference=True)
         encoded = self._encode_processed_harish_input(frame)
-        raw_probs = self.model.predict_proba(encoded)[:, 1]
-        return self._apply_underwriting_policy_layer(raw_df, raw_probs)
+        raw_probs = self.model.predict_proba(encoded[self.features])[:, 1]
+        if apply_policy:
+            return self._apply_underwriting_policy_layer(raw_df, raw_probs)
+        return raw_probs
 
     def _train_and_cache(self, data: pd.DataFrame, excel_sig: str) -> None:
         if 'Target' not in data.columns:
@@ -1304,7 +1348,7 @@ class AIModel:
         self.dealer_dti_cutoff = bundle.get('dealer_dti_cutoff', 0.0)
         self.split_thresholds = bundle.get('split_thresholds', {})
         self.dropped_columns = bundle.get('dropped_columns', [])
-        self.decision_threshold = bundle.get('decision_threshold', 0.5)
+        self.decision_threshold = bundle.get('decision_threshold', 0.40)
         self.auc = bundle.get('auc', float('nan'))
         self.X_full = bundle.get('X_full')
         self._explainer = None

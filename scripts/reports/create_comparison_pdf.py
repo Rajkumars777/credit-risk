@@ -633,11 +633,12 @@ html_content = """<!DOCTYPE html>
 </html>
 """
 
-workspace_root = Path(r"C:\Users\rajak\Videos\ltid-oct\credit-scoring-app")
-artifact_dir = Path(r"C:\Users\rajak\.gemini\antigravity-ide\brain\e5ad1946-ad3a-4837-ac4a-cb5cf8d8340b")
+project_root = Path(__file__).resolve().parent.parent.parent
+docs_dir = project_root / "docs" / "reports"
+docs_dir.mkdir(parents=True, exist_ok=True)
 
-html_file = workspace_root / "CREDIT_SCORING_APP_VS_COLAB_COMPARISON.html"
-pdf_file = workspace_root / "CREDIT_SCORING_APP_VS_COLAB_COMPARISON.pdf"
+html_file = docs_dir / "CREDIT_SCORING_APP_VS_COLAB_COMPARISON.html"
+pdf_file = docs_dir / "CREDIT_SCORING_APP_VS_COLAB_COMPARISON.pdf"
 
 # Write HTML file
 with open(html_file, "w", encoding="utf-8") as f:
@@ -675,9 +676,5 @@ subprocess.run(cmd, check=True)
 if pdf_file.exists():
     size = pdf_file.stat().st_size
     print(f"[SUCCESS] PDF generated at: {pdf_file} ({size:,} bytes)")
-    # Also copy to artifacts directory for direct IDE display
-    artifact_pdf = artifact_dir / "credit_scoring_app_vs_colab_comparison.pdf"
-    shutil.copy2(pdf_file, artifact_pdf)
-    print(f"[SUCCESS] Artifact PDF copied to: {artifact_pdf}")
 else:
     print("[ERROR] PDF generation failed.")

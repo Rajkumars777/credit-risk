@@ -265,8 +265,9 @@ def run_testing(input_file: Path, output_file: Path = None, show_samples: int = 
         output_file = Path(output_file)
         if output_file.suffix.lower() in [".xlsx", ".xls"]:
             export_to_excel(output_file, results_df, df_raw, summary_metrics)
-            # Also keep test_results.csv in sync
-            csv_sync = PROJECT_ROOT / "test_results.csv"
+            # Also keep test_results.csv in sync in outputs/
+            csv_sync = PROJECT_ROOT / "outputs" / "test_results.csv"
+            csv_sync.parent.mkdir(parents=True, exist_ok=True)
             results_df.to_csv(csv_sync, index=False)
             print(f"[INFO] Synced CSV results ({len(results_df):,} rows) to: {csv_sync.resolve()}")
         else:

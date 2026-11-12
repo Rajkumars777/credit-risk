@@ -30,7 +30,14 @@ function Show-Header {
 
 function Assert-Venv {
     if (-not (Test-Path $PythonExe)) {
-        Write-Fail "Virtual environment not found. Run: .\run.ps1 setup"
+        $sysPython = Get-Command python -ErrorAction SilentlyContinue
+        if ($sysPython) {
+            $script:PythonExe = "python"
+            $script:PipExe = "pip"
+            Write-Info "Using system Python environment ($($sysPython.Source))"
+            return
+        }
+        Write-Fail "Virtual environment not found and system python is unavailable. Run: .\run.ps1 setup"
         exit 1
     }
 }
@@ -140,7 +147,10 @@ function Invoke-Build {
         Write-Warn "The built executable will train the model on first launch (may take 5-10 minutes)"
     }
 
-    $IconFile = Join-Path $ProjectRoot "ltid_logo(1).ico"
+    $IconFile = Join-Path $ProjectRoot "ltid_logo.ico"
+    if (-not (Test-Path $IconFile)) {
+        $IconFile = Join-Path $ProjectRoot "src\data\img\ltid_logo.ico"
+    }
     $BuildArgs = @(
         "--noconfirm",
         "--onefile",
@@ -199,8 +209,8 @@ function Invoke-Clean {
             Remove-Item $_.FullName -Force
         }
 
-    # Remove build artifacts
-    @("build", "dist", "*.spec.bak", ".pytest_cache", "htmlcov", ".coverage") |
+    # Remove build artifacts and temporary files
+    @("build", "dist", "*.spec.bak", ".pytest_cache", "htmlcov", ".coverage", "app-startup.log", "*_unlocked.xlsx") |
         ForEach-Object {
             $item = Join-Path $ProjectRoot $_
             if (Test-Path $item) {
@@ -208,6 +218,10 @@ function Invoke-Clean {
                 Write-Info "Removed: $item"
             }
         }
+    Get-ChildItem -Path $ProjectRoot -Filter "*_unlocked.xlsx" -Recurse | ForEach-Object {
+        Remove-Item $_.FullName -Force
+        Write-Info "Removed: $($_.FullName)"
+    }
 
     Write-Success "Clean complete!"
 }

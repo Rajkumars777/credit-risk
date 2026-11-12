@@ -143,10 +143,29 @@ class App(tk.Tk):
         self.resizable(True, True)
 
         # Defer heavy work to a background thread
+        import queue
+        self._init_queue = queue.Queue()
         self.ai = None
         self.logo = None
         self._cached_local_df = None
+        self.after(50, self._poll_init_queue)
         threading.Thread(target=self._heavy_init, daemon=True).start()
+
+    def _poll_init_queue(self):
+        import queue
+        try:
+            status, payload = self._init_queue.get_nowait()
+        except queue.Empty:
+            self.after(50, self._poll_init_queue)
+            return
+
+        if status == "success":
+            self._finish_init(payload)
+        else:
+            if self.splash and self.splash.winfo_exists():
+                self.splash.destroy()
+            tk.messagebox.showerror("Init Error", payload)
+            self.destroy()
 
     def _heavy_init(self):
         """Heavy work: train/load the model, load images, etc. (NO Tk calls here)."""
@@ -158,13 +177,10 @@ class App(tk.Tk):
             # 2) Load header logo image (pure PIL work is OK here)
             img = Image.open(resource_path("src/data/img/logo.png")).resize((180, 70), Image.LANCZOS)
 
-            # Hand off any Tk object creation + UI build to the main thread
-            self.after(0, lambda pil_img=img: self._finish_init(pil_img))
+            # Hand off to main thread via queue
+            self._init_queue.put(("success", img))
         except Exception as e:
-            # Close splash and show an error if something goes wrong
-            error_msg = str(e)
-            self.after(0,
-                       lambda: (self.splash.destroy(), tk.messagebox.showerror("Init Error", error_msg), self.destroy()))
+            self._init_queue.put(("error", str(e)))
             
     def _finish_init(self, pil_img):
         """Back on the main thread: build Tk widgets, close splash, show main window."""

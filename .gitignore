@@ -1,13 +1,46 @@
-.venv/
+# Python bytecode & cache
 __pycache__/
+*.py[cod]
+*$py.class
 .pytest_cache/
-*.pyc
-output/
-models/
-dataset/
-self_testing/
+.coverage
+htmlcov/
+
+# Environments
+.venv/
+venv/
+env/
+ENV/
+
+# Build & Distribution artifacts
 build/
 dist/
+*.spec.bak
 JACCSScore.spec
+
+# Application Logs & Temporary files
+*.log
+app-startup.log
+test_results.csv
+outputs/*_unlocked.xlsx
+outputs/test_results.csv
+*_unlocked.xlsx
 ~$*
+
+# Machine Learning Models & Large Artifacts
+*.joblib
+models/
+src/backend/models/*.joblib
+
+# Local SQLite databases
 *.db
+
+# Legacy / ad-hoc testing folders
+self_testing/
+dataset/
+
+# IDE & OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

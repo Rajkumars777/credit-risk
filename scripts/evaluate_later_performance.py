@@ -86,7 +86,7 @@ def main() -> None:
     parser.add_argument(
         "--input",
         type=Path,
-        default=PROJECT_ROOT / "Raw Jan - Jun 2026.xlsx",
+        default=PROJECT_ROOT / "src/data/Raw Jan - Jun 2026.xlsx" if (PROJECT_ROOT / "src/data/Raw Jan - Jun 2026.xlsx").exists() else PROJECT_ROOT / "Raw Jan - Jun 2026.xlsx",
         help="Later-period workbook or CSV containing observed DPD outcomes.",
     )
     parser.add_argument(

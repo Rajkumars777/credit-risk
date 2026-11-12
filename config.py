@@ -31,7 +31,7 @@ class AppConfig:
     window_title: str = "JACCS Credit Scoring System v2.0.0"
     window_size: str = "1280x800"
     min_window_size: tuple = (900, 600)
-    icon_path: str = "ltid_logo(1).ico"
+    icon_path: str = "ltid_logo.ico"
     debug: bool = False
 
 

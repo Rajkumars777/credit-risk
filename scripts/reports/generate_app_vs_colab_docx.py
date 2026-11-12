@@ -614,6 +614,9 @@ def build_docx(output_path):
     print(f"[SUCCESS] Saved DOCX file to: {output_path}")
 
 if __name__ == "__main__":
-    out = Path(r"c:\Users\rajak\Videos\ltid-oct\credit-scoring-app\CREDIT_SCORING_APP_VS_COLAB_COMPARISON.docx")
+    project_root = Path(__file__).resolve().parent.parent.parent
+    docs_dir = project_root / "docs" / "reports"
+    docs_dir.mkdir(parents=True, exist_ok=True)
+    out = docs_dir / "CREDIT_SCORING_APP_VS_COLAB_COMPARISON.docx"
     build_docx(out)
 
