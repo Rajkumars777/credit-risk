@@ -280,7 +280,7 @@ class TestCreditScoreFormula:
 
     def test_dpd_target_definition(self):
         """
-        The Target column uses DPD > 1 as the default boundary (not DPD > 0).
+        The Target column uses DPD > 0 as the default boundary.
         """
         from src.backend.ai_model import AIModel
         df = pd.DataFrame([
@@ -295,11 +295,8 @@ class TestCreditScoreFormula:
                     "Age as of Contract", "Marital Status"]:
             if col not in df:
                 df[col] = np.nan if col != "Marital Status" else "Single"
-        # We only care about the Target column calculation
-        # DPD > 1 → 1, else 0
-        dpd_values = pd.Series([0, 1, 2, 30])
-        targets = (dpd_values > 1).astype(int)
-        assert list(targets) == [0, 0, 1, 1]
+        processed = AIModel.process_data(df)
+        assert list(processed["Target"]) == [0, 1, 1, 1]
 
     @_SKIP_NO_DATA
     @pytest.mark.integration

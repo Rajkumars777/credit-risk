@@ -73,15 +73,12 @@ def main():
     actual_status = []
     classification = []
     for adpd, pred in zip(actual_dpd, predictions):
-        if pd.isna(adpd):
-            actual_status.append("Non-Default (Current / 0 DPD)")
+        if pd.isna(adpd) or adpd <= 0.0:
+            actual_status.append("Non-Default (DPD <= 0)")
             classification.append("False Positive (FP)" if pred == 1 else "True Negative (TN)")
-        elif adpd > 10.0:
-            actual_status.append("Default (DPD > 10)")
-            classification.append("True Positive (TP)" if pred == 1 else "False Negative (FN)")
         else:
-            actual_status.append("Non-Default (DPD <= 10)")
-            classification.append("False Positive (FP)" if pred == 1 else "True Negative (TN)")
+            actual_status.append("Default (DPD > 0)")
+            classification.append("True Positive (TP)" if pred == 1 else "False Negative (FN)")
 
     # Model Result Columns
     df_out["Predicted Risk (PD)"] = probs
@@ -93,8 +90,8 @@ def main():
     df_out["Actual Status"] = actual_status
     df_out["Classification Outcome"] = classification
 
-    # Ground truth metrics
-    y_true = (actual_dpd.fillna(0) > 10.0).astype(int).to_numpy()
+    # Ground truth metrics (DPD > 0 is Default)
+    y_true = (actual_dpd.fillna(0) > 0.0).astype(int).to_numpy()
     tn, fp, fn, tp = confusion_matrix(y_true, predictions).ravel()
     rec = recall_score(y_true, predictions)
     spec = tn / (tn + fp)
@@ -202,8 +199,8 @@ def main():
     ws_matrix.row_dimensions[3].height = 26
 
     matrix_rows = [
-        ("Actual Performing (DPD <= 10)", tn, fp, tn + fp),
-        ("Actual Default (DPD > 10)", fn, tp, fn + tp),
+        ("Actual Performing (DPD <= 0)", tn, fp, tn + fp),
+        ("Actual Default (DPD > 0)", fn, tp, fn + tp),
         ("Total Predicted", tn + fn, fp + tp, tn + fp + fn + tp),
     ]
 

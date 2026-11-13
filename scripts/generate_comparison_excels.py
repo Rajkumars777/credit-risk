@@ -210,15 +210,12 @@ def build_pure_model_dataframe(df_raw, probabilities, predicted_dpds, threshold)
     actual_status = []
     classification = []
     for adpd, pred in zip(actual_dpd, predictions):
-        if pd.isna(adpd):
-            actual_status.append("Non-Default (Current / 0 DPD)")
+        if pd.isna(adpd) or adpd <= 0.0:
+            actual_status.append("Non-Default (DPD <= 0)")
             classification.append("False Positive (FP)" if pred == 1 else "True Negative (TN)")
-        elif adpd > 10.0:
-            actual_status.append("Default (DPD > 10)")
-            classification.append("True Positive (TP)" if pred == 1 else "False Negative (FN)")
         else:
-            actual_status.append("Non-Default (DPD <= 10)")
-            classification.append("False Positive (FP)" if pred == 1 else "True Negative (TN)")
+            actual_status.append("Default (DPD > 0)")
+            classification.append("True Positive (TP)" if pred == 1 else "False Negative (FN)")
 
     df["Actual Status"] = actual_status
     df["Classification Outcome"] = classification
@@ -271,17 +268,17 @@ def main():
     df_prod_model = build_pure_model_dataframe(df_raw, prod_probs, prod_pred_dpd, prod_threshold)
 
     # Target 1: Entire Portfolio (2,845 records, where blank DPD = performing / 0 DPD)
-    y_all = (observed_dpd.fillna(0) > 10.0).astype(int).to_numpy()
+    y_all = (observed_dpd.fillna(0) > 0.0).astype(int).to_numpy()
     raw_metrics_all = compute_metrics(y_all, raw_probs, raw_threshold, y_pred=df_raw_model["Prediction"].to_numpy())
     prod_metrics_all = compute_metrics(y_all, prod_probs, prod_threshold, y_pred=df_prod_model["Prediction"].to_numpy())
 
     # Target 2: Labeled Delinquency Cohort (714 records with observed DPD)
     labeled_mask = observed_dpd.notna().to_numpy()
-    y_lab = (observed_dpd[labeled_mask] > 10.0).astype(int).to_numpy()
+    y_lab = (observed_dpd[labeled_mask] > 0.0).astype(int).to_numpy()
     raw_metrics_lab = compute_metrics(y_lab, raw_probs[labeled_mask], raw_threshold, y_pred=df_raw_model["Prediction"].to_numpy()[labeled_mask])
     prod_metrics_lab = compute_metrics(y_lab, prod_probs[labeled_mask], prod_threshold, y_pred=df_prod_model["Prediction"].to_numpy()[labeled_mask])
 
-    print("\n--- EXACT APPLICATION MODEL BENCHMARK (Ground Truth: Current DPD > 10) ---")
+    print("\n--- EXACT APPLICATION MODEL BENCHMARK (Ground Truth: Current DPD > 0) ---")
     print("FULL PORTFOLIO (2,845 rows):")
     print(f"  Initial Raw Model:             TP={raw_metrics_all['True Positives (TP)']}, FN={raw_metrics_all['False Negatives (FN)']}, FP={raw_metrics_all['False Positives (FP)']}, TN={raw_metrics_all['True Negatives (TN)']}, Recall={raw_metrics_all['Default Recall']*100:.2f}%, Precision={raw_metrics_all['Precision']*100:.2f}%, Specificity={raw_metrics_all['Specificity']*100:.2f}%, AUC={raw_metrics_all['ROC-AUC']:.4f}")
     print(f"  Production Optimization Model: TP={prod_metrics_all['True Positives (TP)']}, FN={prod_metrics_all['False Negatives (FN)']}, FP={prod_metrics_all['False Positives (FP)']}, TN={prod_metrics_all['True Negatives (TN)']}, Recall={prod_metrics_all['Default Recall']*100:.2f}%, Precision={prod_metrics_all['Precision']*100:.2f}%, Specificity={prod_metrics_all['Specificity']*100:.2f}%, AUC={prod_metrics_all['ROC-AUC']:.4f}")
@@ -293,11 +290,11 @@ def main():
     # Build Summary DataFrame
     summary_data = [
         {"Category": "Overview", "Metric / Indicator": "Evaluation Dataset", "Initial Raw Model": INPUT_FILE.name, "Production Optimization Model": INPUT_FILE.name, "Variance / Net Gain": "-"},
-        {"Category": "Overview", "Metric / Indicator": "Default Definition", "Initial Raw Model": "Current DPD > 10", "Production Optimization Model": "Current DPD > 10", "Variance / Net Gain": "Standardized Basel II"},
+        {"Category": "Overview", "Metric / Indicator": "Default Definition", "Initial Raw Model": "Current DPD > 0", "Production Optimization Model": "Current DPD > 0", "Variance / Net Gain": "Zero Tolerance Delinquency (DPD > 0)"},
         {"Category": "Overview", "Metric / Indicator": "Decision Threshold", "Initial Raw Model": f"{raw_threshold:.2f}", "Production Optimization Model": f"{prod_threshold:.2f}", "Variance / Net Gain": f"{prod_threshold:.2f} Calibrated Cutoff"},
         {"Category": "Overview", "Metric / Indicator": "Total Portfolio Records", "Initial Raw Model": len(df_raw), "Production Optimization Model": len(df_raw), "Variance / Net Gain": "-"},
-        {"Category": "Overview", "Metric / Indicator": "Actual Defaulters (Current DPD > 10)", "Initial Raw Model": raw_metrics_all["Actual Defaults (y=1)"], "Production Optimization Model": prod_metrics_all["Actual Defaults (y=1)"], "Variance / Net Gain": "678 Defaulters (23.83%)"},
-        {"Category": "Overview", "Metric / Indicator": "Actual Non-Defaulters (DPD <= 10 or Current)", "Initial Raw Model": raw_metrics_all["Actual Non-Defaults (y=0)"], "Production Optimization Model": prod_metrics_all["Actual Non-Defaults (y=0)"], "Variance / Net Gain": "2,167 Performing (76.17%)"},
+        {"Category": "Overview", "Metric / Indicator": "Actual Defaulters (Current DPD > 0)", "Initial Raw Model": raw_metrics_all["Actual Defaults (y=1)"], "Production Optimization Model": prod_metrics_all["Actual Defaults (y=1)"], "Variance / Net Gain": "708 Defaulters (24.89%)"},
+        {"Category": "Overview", "Metric / Indicator": "Actual Non-Defaulters (DPD <= 0 or Current)", "Initial Raw Model": raw_metrics_all["Actual Non-Defaults (y=0)"], "Production Optimization Model": prod_metrics_all["Actual Non-Defaults (y=0)"], "Variance / Net Gain": "2,137 Performing (75.11%)"},
 
         # Portfolio Benchmark (2,845 rows)
         {"Category": "Portfolio Benchmark (2,845 Rows)", "Metric / Indicator": "Predicted Defaults (Prediction = 1)", "Initial Raw Model": int(df_raw_model["Prediction"].sum()), "Production Optimization Model": int(df_prod_model["Prediction"].sum()), "Variance / Net Gain": f"+{int(df_prod_model['Prediction'].sum()) - int(df_raw_model['Prediction'].sum()):,} additional defaults flagged"},

@@ -305,7 +305,7 @@ class AIModel:
         data = data.drop(columns=['Birthday', 'BAP Date'], errors='ignore')
         if 'Longest_DPD' in data:
             data['Longest_DPD'] = pd.to_numeric(data['Longest_DPD'], errors='coerce').fillna(0)
-            data['Target'] = (data['Longest_DPD'] > 1).astype(int)  # DPD > 1 is the default definition
+            data['Target'] = (data['Longest_DPD'] > 0).astype(int)  # DPD > 0 is the default definition
 
         numeric_columns = ['BAP Amount', 'EV Income', 'EV Tenure', 'BV Income', 'Price Gap', 'BV Tenure', 'DSCR', 'Claimed Tenure', 'Claimed Income', 'Residence Tenure', 'Amount Finance', 'Downpayment', 'Payment Terms', 'Interest Rate', 'Loan Amort', 'Age as of Contract', 'Downpayment %']
         for column in numeric_columns:
@@ -1138,9 +1138,9 @@ class AIModel:
             key: value for key, value in selected_params.items()
             if key != 'scale_pos_weight'
         }
-        positive_train = dpd_train_target > 1
+        positive_train = dpd_train_target > 0
         positive_final_target = pd.concat([dpd_train_target, dpd_val_target], ignore_index=True)
-        positive_final = positive_final_target > 1
+        positive_final = positive_final_target > 0
         dpd_model = LGBMRegressor(
             **dpd_params,
             objective='regression_l1',
